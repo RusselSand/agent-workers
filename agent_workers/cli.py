@@ -67,7 +67,11 @@ def collect(worker: Worker, options) -> int:
     if not options.key:
         print("нужен ключ хода или --all", file=sys.stderr)
         return 2
-    worker.collect(options.key)
+    try:
+        worker.collect(options.key)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)     # ключ приходит от человека, трассировка ему ни к чему
+        return 2
     print(f"забрано: {options.key}")
     return 0
 

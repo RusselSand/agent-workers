@@ -18,14 +18,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .contract import Adapter, Profile
-from .entry import Entry, digest
+from .entry import Entry, digest, folder_for
 from .guard import Guard, LimitPolicy
-from .process import alive, capture, interactive, supervise
+from .process import capture, interactive, supervise
 
 log = logging.getLogger(__name__)
 
-EPOCH = "AGENT_PROCESS_EPOCH"   # у контейнера после перезапуска PID начинаются заново
 DELIVERED = ("answered", "incomplete")   # ход кончился, результат ждёт получателя
+UNFINISHED = ("prepared", "running", "captured")
 
 
 @dataclass
@@ -54,21 +54,31 @@ class Worker:
     def run(self, request: Mapping[str, object], *, key: str | None = None,
             pulse=None, stop=None, retry: bool = False) -> dict:
         entry = Entry(self.root, key or digest({"adapter": self.adapter.name, "request": request}))
+        if not entry.claim():
+            # Папкой владеет живой процесс. Ни повторять, ни двигать его журналы нельзя:
+            # иначе второй вызов оплатит ту же работу, а состояние напишут оба сразу.
+            return self.result("in_progress", entry, None, None, None,
+                               reason="ход уже выполняется другим процессом")
+        try:
+            return self.attempt(entry, request, pulse=pulse, stop=stop, retry=retry)
+        finally:
+            entry.release()
+
+    def attempt(self, entry: Entry, request: Mapping[str, object], *,
+                pulse=None, stop=None, retry: bool = False) -> dict:
         if retry:
             entry.restart()
 
         done = self.finished(entry)
         if done is not None:
             return done
-
-        if not entry.reserve_start():
-            # Маркер уже стоит. Либо ход идёт прямо сейчас, либо это след оборванного.
+        if entry.attempted:
+            # Маркер стоит, а владельца нет: это итог прошлой попытки, а не работа.
             return self.taken(entry)
 
         waiting = len(self.pending())
         if waiting >= self.max_pending:
             # Лучше встать, чем молча забивать диск текстами, которые никто не забирает.
-            entry.release_start()
             entry.drop()
             return self.result("outbox_full", entry, None, None, None,
                                reason=f"не забрано результатов: {waiting}")
@@ -76,13 +86,12 @@ class Worker:
         before = self.guard.measure("before")
         reason = self.guard.blocked(before)
         if reason:
-            # Ничего не потрачено и ничего не записано: отказ до сборки запроса.
-            entry.release_start()
             entry.drop()   # в папке ничего нет: ход не начинался
             return self.result("limit_reached", entry, None, before, None, reason=reason)
 
         command = self.adapter.ask(entry, request, self.profile)
-        entry.update(state="running", pid=os.getpid(), epoch=os.environ.get(EPOCH))
+        entry.mark_started()
+        entry.update(state="running", pid=os.getpid())
         outcome = supervise(command, stdout=entry.stdout, stderr=entry.stderr,
                             pulse=pulse, stop=stop, timeout=self.timeout)
         entry.update(state="captured", pid=None, returncode=outcome.returncode,
@@ -103,8 +112,13 @@ class Worker:
 
     def collect(self, entry: Entry | str) -> None:
         """Забрали — папку сносим. Сколько хранить, решает тот, кто забирает."""
-        entry = entry if isinstance(entry, Entry) else Entry(self.root, entry)
-        entry.drop()
+        if isinstance(entry, Entry):
+            entry.drop()
+            return
+        folder = folder_for(self.root, entry)   # ключ приходит снаружи, его проверяют
+        if not (folder / "state.json").is_file():
+            raise ValueError(f"Хода с таким ключом нет: {entry}")
+        Entry(self.root, entry).drop()
 
     def finished(self, entry: Entry) -> dict | None:
         """Готовый ответ стоит ноль: отдаём его, не трогая ни лимит, ни состояние."""
@@ -114,20 +128,16 @@ class Worker:
         return self.result("resumed", entry, reply, None, None) if reply.complete else None
 
     def taken(self, entry: Entry) -> dict:
-        """Кто-то уже занял эту папку: либо работает, либо когда-то не доработал."""
-        meta = entry.meta
-        if meta.get("state") == "running" and alive(meta.get("pid"), epoch=meta.get("epoch"),
-                                                    current_epoch=os.environ.get(EPOCH)):
-            return self.result("in_progress", entry, None, None, None)
-        # Процесса нет: это итог прошлой попытки. Повтор — только по явной просьбе,
-        # иначе автоматика будет бесконечно переделывать то, что уже стоило денег.
+        """Прошлая попытка кончилась ничем: отдаём её итог, а не «всё ещё идёт»."""
+        state = entry.meta.get("state") or "incomplete"
         reply = self.adapter.reply(entry, self.profile)
-        state = "resumed" if reply.complete else meta.get("state") or "incomplete"
-        if state == "running":
-            state = "incomplete"    # процесс умер, не дописав состояние
-        return self.result(state, entry, reply, None, None,
-                           reason=None if reply.complete else "прошлая попытка не завершилась; "
-                                  "повтор — run(..., retry=True)")
+        if reply.complete:
+            return self.result("resumed", entry, reply, None, None)
+        # Повтор — только по явной просьбе: автоматика иначе будет бесконечно
+        # переделывать то, что уже стоило денег.
+        return self.result("incomplete" if state in UNFINISHED else state, entry, reply,
+                           None, None,
+                           reason="прошлая попытка не завершилась; повтор — run(..., retry=True)")
 
     def result(self, state, entry, reply, before, after, *, reason=None) -> dict:
         return {"state": state, "entry": entry, "reply": reply, "reason": reason,

@@ -116,3 +116,8 @@ def test_collect_removes_the_folder(tmp_path, capsys):
 def test_empty_outbox_says_so(capsys):
     assert cli.main(["pending"]) == 0
     assert "лоток пуст" in capsys.readouterr().out
+
+
+def test_collect_says_no_to_a_dangerous_key(capsys):
+    assert cli.main(["collect", ".."]) == 2
+    assert "ключ" in capsys.readouterr().err

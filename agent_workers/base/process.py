@@ -74,31 +74,3 @@ def supervise(command: Command, *, stdout: Path, stderr: Path, pulse=None, stop=
         if command.stdin:
             stdin.close()
     return Outcome(process.returncode, interruption)
-
-
-def alive(pid, *, epoch: str | None = None, current_epoch: str | None = None) -> bool:
-    """PID переиспользуются после перезапуска контейнера: чужая эпоха — чужой процесс."""
-    if current_epoch and epoch != current_epoch:
-        return False
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    if os.name == "nt":
-        import ctypes
-
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.OpenProcess.restype = ctypes.c_void_p
-        kernel.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
-        kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
-        handle = kernel.OpenProcess(0x1000, False, pid)
-        if not handle:
-            return False
-        try:
-            code = ctypes.c_ulong()
-            return bool(kernel.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
-        finally:
-            kernel.CloseHandle(handle)
-    try:
-        os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, PermissionError):
-        return False

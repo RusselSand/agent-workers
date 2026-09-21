@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from agent_workers.base import (
     Command,
     Cost,
@@ -16,7 +18,7 @@ from agent_workers.base import (
     Window,
     Worker,
 )
-from agent_workers.base.entry import Entry, digest
+from agent_workers.base.entry import Entry, digest, folder_for
 
 QUIET = LimitPolicy(settle_reads=1, settle_delay=0)
 
@@ -70,10 +72,37 @@ def test_digest_is_stable_for_the_same_request():
     assert digest({"a": 1, "b": 2}) == digest({"b": 2, "a": 1})
 
 
-def test_entry_start_marker_is_taken_once(tmp_path):
+def test_folder_is_owned_by_one_process_at_a_time(tmp_path):
     entry = Entry(tmp_path, "run")
-    assert entry.reserve_start() is True
-    assert Entry(tmp_path, "run").reserve_start() is False
+    assert entry.claim() is True
+    assert Entry(tmp_path, "run").claim() is False   # замок держит первый
+    entry.release()
+    assert Entry(tmp_path, "run").claim() is True    # отпустил — можно брать
+
+
+def test_key_cannot_point_outside_the_folder(tmp_path):
+    """Ключ приходит снаружи, а папку сносят рекурсивно: путь в ключе недопустим."""
+    for key in ("..", ".", "", "../соседняя", "/abs", "C:/windows", "вложенный/путь"):
+        with pytest.raises(ValueError):
+            folder_for(tmp_path, key)
+    assert folder_for(tmp_path, "обычный-ключ") == (tmp_path / "обычный-ключ").resolve()
+
+
+def test_collect_refuses_a_key_that_is_a_path(tmp_path, profile):
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
+    victim = tmp_path / "runs"
+    victim.mkdir(parents=True)
+    (victim / "чужое.txt").write_text("не трогать", encoding="utf-8")
+    for key in ("..", "../runs", "/tmp"):
+        with pytest.raises(ValueError):
+            worker.collect(key)
+    assert (victim / "чужое.txt").exists()
+
+
+def test_collect_refuses_an_unknown_key(tmp_path, profile):
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
+    with pytest.raises(ValueError, match="нет"):
+        worker.collect("никогда-не-существовавший")
 
 
 def test_worker_measures_before_and_after_and_reports_the_price(tmp_path, profile):
@@ -126,8 +155,8 @@ def test_dead_attempt_is_not_reported_as_running(tmp_path, profile):
     """След оборванной попытки не должен выдавать себя за идущую работу."""
     worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
     entry = Entry(tmp_path / "runs", digest({"adapter": "fake", "request": {"user": "привет"}}))
-    entry.reserve_start()
-    entry.update(state="running", pid=999_999_999, epoch=None)
+    entry.mark_started()
+    entry.update(state="running", pid=999_999_999)   # владельца нет: замок никто не держит
 
     stalled = worker.run({"user": "привет"})
     assert stalled["state"] == "incomplete"
@@ -135,10 +164,9 @@ def test_dead_attempt_is_not_reported_as_running(tmp_path, profile):
 
 
 def test_retry_starts_a_clean_attempt_and_keeps_the_old_one(tmp_path, profile):
-    adapter = FakeAdapter(tmp_path)
-    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
     entry = Entry(tmp_path / "runs", digest({"adapter": "fake", "request": {"user": "привет"}}))
-    entry.reserve_start()
+    entry.mark_started()
     entry.write("stdout.jsonl", "обрывок прошлой попытки")
     entry.update(state="incomplete")
 
@@ -149,13 +177,71 @@ def test_retry_starts_a_clean_attempt_and_keeps_the_old_one(tmp_path, profile):
 
 
 def test_live_owner_is_left_alone(tmp_path, profile):
-    import os
-
     worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
-    entry = Entry(tmp_path / "runs", digest({"adapter": "fake", "request": {"user": "привет"}}))
-    entry.reserve_start()
-    entry.update(state="running", pid=os.getpid(), epoch=None)
-    assert worker.run({"user": "привет"})["state"] == "in_progress"
+    owner = Entry(tmp_path / "runs", digest({"adapter": "fake", "request": {"user": "привет"}}))
+    assert owner.claim() is True
+    try:
+        assert worker.run({"user": "привет"})["state"] == "in_progress"
+    finally:
+        owner.release()
+
+
+def test_retry_does_not_touch_a_live_attempt(tmp_path, profile):
+    """Иначе журналы работающего хода уехали бы в архив, а вызов оплатил бы его заново."""
+    adapter = FakeAdapter(tmp_path)
+    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
+    owner = Entry(tmp_path / "runs", digest({"adapter": "fake", "request": {"user": "привет"}}))
+    owner.claim()
+    owner.mark_started()
+    owner.write("stdout.jsonl", "идущая работа")
+    try:
+        refused = worker.run({"user": "привет"}, retry=True)
+    finally:
+        owner.release()
+    assert refused["state"] == "in_progress"
+    assert adapter.asked == []                                   # второго вызова не было
+    assert owner.read("stdout.jsonl") == "идущая работа"          # журнал на месте
+    assert not (owner.folder / "attempt-1").exists()              # архива не появилось
+
+
+def test_result_waits_in_the_outbox_until_it_is_collected(tmp_path, profile):
+    """Папка живёт не по таймеру, а пока результат не заберут."""
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
+    result = worker.run({"user": "привет"})
+
+    waiting = worker.pending()
+    assert [entry.folder for entry in waiting] == [result["entry"].folder]
+
+    worker.collect(waiting[0])
+    assert worker.pending() == []
+    assert not result["entry"].folder.exists()
+
+
+def test_collected_answer_is_no_longer_served_for_free(tmp_path, profile):
+    adapter = FakeAdapter(tmp_path, percent=[1.0, 2.0, 3.0, 4.0])
+    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
+    worker.collect(worker.run({"user": "привет"})["entry"])
+    assert worker.run({"user": "привет"})["state"] == "answered"   # выполнили заново, честно
+
+
+def test_full_outbox_stops_new_turns_instead_of_filling_the_disk(tmp_path, profile):
+    adapter = FakeAdapter(tmp_path, percent=[1.0, 2.0])
+    worker = Worker(adapter, profile, tmp_path / "runs", QUIET, max_pending=1)
+    worker.run({"user": "первый"})
+    reads, asked = adapter.reads, len(adapter.asked)
+
+    stopped = worker.run({"user": "второй"})
+    assert stopped["state"] == "outbox_full"
+    assert (adapter.reads, len(adapter.asked)) == (reads, asked)   # ничего не потрачено
+    assert len(worker.pending()) == 1                              # мусора не прибавилось
+
+
+def test_refused_turn_leaves_no_folder_behind(tmp_path, profile):
+    worker = Worker(FakeAdapter(tmp_path, percent=[99.0]), profile, tmp_path / "runs", QUIET)
+    refused = worker.run({"user": "привет"})
+    assert refused["state"] == "limit_reached"
+    assert not refused["entry"].folder.exists()
+    assert worker.pending() == []
 
 
 def test_measurement_after_the_turn_waits_for_accounting(tmp_path, profile):
@@ -204,43 +290,3 @@ def test_failed_measurement_does_not_break_the_turn(tmp_path, profile):
 
     result = Worker(Broken(tmp_path), profile, tmp_path / "runs", QUIET).run({"user": "привет"})
     assert result["state"] == "answered" and result["before"] is None
-
-
-def test_result_waits_in_the_outbox_until_it_is_collected(tmp_path, profile):
-    """Папка живёт не по таймеру, а пока результат не заберут."""
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
-    result = worker.run({"user": "привет"})
-
-    waiting = worker.pending()
-    assert [entry.folder for entry in waiting] == [result["entry"].folder]
-
-    worker.collect(waiting[0])
-    assert worker.pending() == []
-    assert not result["entry"].folder.exists()
-
-
-def test_collected_answer_is_no_longer_served_for_free(tmp_path, profile):
-    adapter = FakeAdapter(tmp_path, percent=[1.0, 2.0, 3.0, 4.0])
-    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
-    worker.collect(worker.run({"user": "привет"})["entry"])
-    assert worker.run({"user": "привет"})["state"] == "answered"   # выполнили заново, честно
-
-
-def test_full_outbox_stops_new_turns_instead_of_filling_the_disk(tmp_path, profile):
-    adapter = FakeAdapter(tmp_path, percent=[1.0, 2.0])
-    worker = Worker(adapter, profile, tmp_path / "runs", QUIET, max_pending=1)
-    worker.run({"user": "первый"})
-    reads, asked = adapter.reads, len(adapter.asked)
-
-    stopped = worker.run({"user": "второй"})
-    assert stopped["state"] == "outbox_full"
-    assert (adapter.reads, len(adapter.asked)) == (reads, asked)   # ничего не потрачено
-    assert len(worker.pending()) == 1                              # мусора не прибавилось
-
-
-def test_refused_turn_leaves_no_folder_behind(tmp_path, profile):
-    worker = Worker(FakeAdapter(tmp_path, percent=[99.0]), profile, tmp_path / "runs", QUIET)
-    refused = worker.run({"user": "привет"})
-    assert refused["state"] == "limit_reached"
-    assert not refused["entry"].folder.exists()
-    assert worker.pending() == []

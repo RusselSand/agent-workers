@@ -1,4 +1,9 @@
-"""Папка одного хода: состояние в state.json, транспорт — в журналах на дозапись."""
+"""Папка одного хода: состояние в state.json, транспорт — в журналах на дозапись.
+
+Владелец папки определяется замком операционной системы, а не записанным PID:
+замок снимается сам, когда процесс умер или контейнер перезапустили, поэтому
+брошенную работу не спутать с идущей.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +13,8 @@ import os
 import shutil
 from pathlib import Path
 
+RESERVED = (".", "..")
+
 
 def digest(value) -> str:
     """Стабильный ключ хода: один и тот же запрос попадает в ту же папку."""
@@ -15,11 +22,29 @@ def digest(value) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
+def folder_for(root: Path, key: str) -> Path:
+    """Ключ — имя папки внутри root, и ничего больше.
+
+    Проверка обязательна: ключ приходит снаружи, а папку потом сносят рекурсивно.
+    Без неё ключ «..» или абсолютный путь удалил бы чужой каталог.
+    """
+    if not isinstance(key, str) or not key or key in RESERVED:
+        raise ValueError(f"Недопустимый ключ хода: {key!r}")
+    if os.sep in key or (os.altsep and os.altsep in key) or "/" in key or ":" in key:
+        raise ValueError(f"Ключ хода — имя папки, а не путь: {key!r}")
+    base = Path(root).resolve()
+    folder = (base / key).resolve()
+    if folder.parent != base or folder == base:
+        raise ValueError(f"Ключ хода выводит за пределы каталога: {key!r}")
+    return folder
+
+
 class Entry:
     def __init__(self, root: Path, key: str) -> None:
-        self.folder = Path(root) / key
+        self.folder = folder_for(root, key)
         self.folder.mkdir(parents=True, exist_ok=True)
         self.state_path = self.folder / "state.json"
+        self.lock = None
         if not self.state_path.exists():
             self._write({"state": "prepared", "started": False, "session_id": None, "pid": None})
 
@@ -34,6 +59,11 @@ class Entry:
     @property
     def meta(self) -> dict:
         return json.loads(self.state_path.read_text(encoding="utf-8"))
+
+    @property
+    def attempted(self) -> bool:
+        """Ход уже начинали — неважно, чем он кончился."""
+        return bool(self.meta.get("started"))
 
     def update(self, **values) -> None:
         self._write({**self.meta, **values})
@@ -59,30 +89,47 @@ class Entry:
         path.write_text(text, encoding="utf-8")
         return path
 
-    def reserve_start(self) -> bool:
-        """Маркер ставится атомарно: два процесса не начнут один и тот же ход дважды."""
+    def claim(self) -> bool:
+        """Взять папку во владение. False — ею уже владеет живой процесс.
+
+        Замок держится операционной системой и снимается сама, когда владелец исчез,
+        поэтому переживает и падение процесса, и перезапуск контейнера.
+        """
+        if self.lock is not None:
+            return True
+        handle = (self.folder / "owner.lock").open("a+b")
         try:
-            os.close(os.open(self.folder / "started", os.O_CREAT | os.O_EXCL | os.O_WRONLY))
-        except FileExistsError:
+            take_lock(handle)
+        except OSError:
+            handle.close()
             return False
-        self.update(started=True)
+        self.lock = handle
         return True
 
-    def release_start(self) -> None:
-        """Ход так и не начался: снимаем маркер, папка снова свободна."""
-        (self.folder / "started").unlink(missing_ok=True)
-        self.update(started=False, state="prepared")
+    def release(self) -> None:
+        if self.lock is None:
+            return
+        try:
+            free_lock(self.lock)
+        finally:
+            self.lock.close()
+            self.lock = None
+
+    def mark_started(self) -> None:
+        """Ход действительно начинается: отметка переживёт падение и не даст его повторить."""
+        self.update(started=True)
 
     def restart(self) -> int:
         """Повтор: прежнюю попытку отодвигаем целиком, чтобы разбор не смешал две.
 
-        Переносим всё, кроме состояния: что именно лежит в папке, знает провайдер.
+        Переносим всё, кроме состояния и замка: что ещё лежит в папке, знает провайдер.
         """
         attempt = int(self.meta.get("attempt", 0)) + 1
         archive = self.folder / f"attempt-{attempt}"
         archive.mkdir(exist_ok=True)
+        keep = {self.state_path.name, "owner.lock"}
         for path in self.folder.iterdir():
-            if path.name != self.state_path.name and not path.name.startswith("attempt-"):
+            if path.name not in keep and not path.name.startswith("attempt-"):
                 path.replace(archive / path.name)
         self._write({**self.meta, "state": "prepared", "started": False,
                      "pid": None, "attempt": attempt})
@@ -90,4 +137,25 @@ class Entry:
 
     def drop(self) -> None:
         """Забрали — папка не нужна: сносим целиком, вместе с отложенными попытками."""
+        self.release()
         shutil.rmtree(self.folder, ignore_errors=True)
+
+
+if os.name == "nt":
+    import msvcrt
+
+    def take_lock(handle) -> None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+
+    def free_lock(handle) -> None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+else:
+    import fcntl
+
+    def take_lock(handle) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def free_lock(handle) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
