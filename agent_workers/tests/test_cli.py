@@ -178,3 +178,14 @@ def test_empty_reply_is_explained_with_the_cli_diagnostic():
         "прошлая попытка не завершилась")
     assert cli.explain({"reason": None, "reply": None}) == "ход не дал ответа"
 
+
+def test_report_tells_how_to_continue_the_conversation(tmp_path, capsys):
+    from agent_workers.base import Entry, Reply
+
+    entry = Entry(tmp_path, "ход")
+    result = {"reply": Reply("ок", session_id="сессия-42", complete=True), "entry": entry,
+              "tokens": None, "cost": None, "before": None, "after": None, "spent": {},
+              "reason": None}
+    cli.report(result)
+    assert "--session сессия-42" in capsys.readouterr().err
+

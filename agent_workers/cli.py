@@ -130,6 +130,9 @@ def run(worker: Worker, options) -> int:
         print("лоток полон: " + result["reason"], file=sys.stderr)
         print("заберите результаты: python -m agent_workers pending", file=sys.stderr)
         return 6
+    if state == "aborted":
+        print("ход не начат: " + result["reason"], file=sys.stderr)
+        return 7
     if result["reply"] is None or not result["reply"].text:
         print(explain(result), file=sys.stderr)
         return 4
@@ -166,6 +169,10 @@ def report(result) -> None:
         print(f"окно {name}: {was}% -> {now}% ({delta:+})", file=sys.stderr)
     if result["reply"].diagnostic:
         print(f"замечание: {result['reply'].diagnostic}", file=sys.stderr)
+    if result["reply"].session_id:
+        # Единственное место, откуда человек узнаёт, чем продолжить беседу.
+        print(f"сессия: {result['reply'].session_id} · продолжить: "
+              f"--session {result['reply'].session_id}", file=sys.stderr)
     print(f"папка хода: {result['entry'].folder}", file=sys.stderr)
 
 

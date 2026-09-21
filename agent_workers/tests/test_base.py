@@ -805,3 +805,72 @@ def test_stubborn_grandchild_is_killed_after_the_leader_exits(tmp_path):
     else:
         pytest.fail("упрямый внук пережил снятие хода")
 
+
+def test_crash_between_answer_and_advance_is_healed_on_next_read(tmp_path, profile):
+    """Ответ записан, номер беседы — нет: следующее чтение доделает, а не заморозит."""
+    worker = Worker(FakeAdapter(tmp_path, percent=[1.0] * 10), profile, tmp_path / "runs", QUIET)
+    worker.run({"user": "продолжай", "session": "беседа"})
+    assert worker.generation("беседа") == 1
+    worker.session_file("беседа", "gen").write_text("0", encoding="utf-8")   # как будто упали
+
+    healed = worker.run({"user": "продолжай", "session": "беседа"})
+    assert healed["state"] == "resumed"                # тот же ключ — тот же ответ
+    assert worker.generation("беседа") == 1            # и номер восстановлен из папки
+    assert worker.run({"user": "продолжай", "session": "беседа"})["state"] == "answered"
+
+
+def test_no_stray_folder_when_the_conversation_is_busy(tmp_path, profile):
+    from agent_workers.base.entry import hold, let_go
+
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
+    busy = hold(worker.session_file("беседа", "lock"))
+    try:
+        blocked = worker.run({"user": "новый вопрос", "session": "беседа"})
+    finally:
+        let_go(busy)
+    assert blocked["state"] == "in_progress"
+    assert not blocked["entry"].folder.exists()        # папку завели зря — убрали
+
+
+def test_retry_keeps_the_old_result_when_preflight_fails(tmp_path, profile):
+    """Отказ до запуска не должен стирать результат, который ещё можно доставить."""
+    class LoggedOut(FakeAdapter):
+        def verify(self, captured):
+            raise RuntimeError("выхода из учётной записи")
+
+    adapter = LoggedOut(tmp_path, percent=[1.0, 1.0, 99.0])
+    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
+    first = worker.run({"user": "вопрос"}, key="задача")
+    assert first["state"] == "answered"
+
+    with pytest.raises(RuntimeError):                  # вход не подтверждён
+        worker.run({"user": "вопрос"}, key="задача", retry=True, ensure_login=True)
+    refused = worker.run({"user": "вопрос"}, key="задача", retry=True)   # лимит 99%
+    assert refused["state"] == "limit_reached"
+
+    kept = worker.run({"user": "вопрос"}, key="задача")
+    assert kept["state"] == "resumed" and kept["reply"].text == "вопрос"
+    assert not (first["entry"].folder / "attempt-1").exists()   # архив не заводился
+
+
+def test_shutdown_requested_before_launch_does_not_start_a_turn(tmp_path, profile):
+    adapter = FakeAdapter(tmp_path)
+    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
+    result = worker.run({"user": "вопрос"}, stop=lambda: True)
+    assert result["state"] == "aborted"
+    assert adapter.asked == []                          # CLI не запускалась
+    assert worker.outbox.occupied() == 0                # бронь снята
+
+
+def test_broken_reply_parsing_is_an_incomplete_result_not_a_crash(tmp_path, profile):
+    class Unparseable(FakeAdapter):
+        def reply(self, entry, profile):
+            raise ValueError("формат вывода изменился")
+
+    worker = Worker(Unparseable(tmp_path), profile, tmp_path / "runs", QUIET)
+    result = worker.run({"user": "вопрос"})
+    assert result["state"] == "incomplete"
+    assert "reply_error" in result["reply"].diagnostic
+    again = worker.run({"user": "вопрос"})              # папка не роняет читающих
+    assert again["state"] == "incomplete" and "retry" in again["reason"]
+
