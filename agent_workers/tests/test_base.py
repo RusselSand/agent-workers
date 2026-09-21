@@ -874,3 +874,41 @@ def test_broken_reply_parsing_is_an_incomplete_result_not_a_crash(tmp_path, prof
     again = worker.run({"user": "вопрос"})              # папка не роняет читающих
     assert again["state"] == "incomplete" and "retry" in again["reason"]
 
+
+def test_failed_login_check_leaves_no_hidden_folder_for_a_new_request(tmp_path, profile):
+    class LoggedOut(FakeAdapter):
+        def verify(self, captured):
+            raise RuntimeError("выхода из учётной записи")
+
+    worker = Worker(LoggedOut(tmp_path), profile, tmp_path / "runs", QUIET)
+    with pytest.raises(RuntimeError):
+        worker.run({"user": "вопрос"}, ensure_login=True)
+    assert not any((tmp_path / "runs").glob("[!.]*"))      # ни одной папки хода
+
+
+def test_first_time_retry_still_reserves_a_slot(tmp_path, profile):
+    """retry по ключу без прошлой попытки — обычный первый ход, с бронью и уборкой."""
+    from agent_workers.base.outbox import Outbox
+
+    class Peeking(FakeAdapter):
+        seen: list = []
+
+        def limits(self, profile, *, session=None, model=None):
+            self.seen.append(Outbox(tmp_path / "runs").occupied())
+            return super().limits(profile, session=session, model=model)
+
+    adapter = Peeking(tmp_path, percent=[1.0, 1.0])
+    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
+    result = worker.run({"user": "вопрос"}, key="новая", retry=True)
+    assert result["state"] == "answered"
+    assert adapter.seen[0] == 1                       # во время замера место уже занято
+    assert not (result["entry"].folder / "attempt-1").exists()   # архивировать было нечего
+
+
+def test_generation_never_moves_backwards(tmp_path, profile):
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
+    worker.advance("беседа", 2)
+    worker.advance("беседа", 1)                       # запоздалое восстановление
+    assert worker.generation("беседа") == 2
+    assert worker.session_file("беседа", "gen.lock").exists()   # обновление шло под замком
+

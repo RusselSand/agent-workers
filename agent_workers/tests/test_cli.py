@@ -189,3 +189,15 @@ def test_report_tells_how_to_continue_the_conversation(tmp_path, capsys):
     cli.report(result)
     assert "--session сессия-42" in capsys.readouterr().err
 
+
+def test_invalid_request_is_a_concise_message_not_a_traceback(monkeypatch, capsys):
+    from agent_workers.base import worker as worker_module
+
+    def rejecting(self, request, **kwargs):
+        raise ValueError("Неверный идентификатор сессии Codex")
+
+    monkeypatch.setattr(worker_module.Worker, "run", rejecting)
+    assert cli.main(["run", "--session", "; rm -rf /", "привет"]) == 2
+    err = capsys.readouterr().err
+    assert "запрос отклонён" in err and "Traceback" not in err and "login" not in err
+

@@ -114,6 +114,22 @@ def let_go(handle) -> None:
         handle.close()
 
 
+@contextmanager
+def guarded(path: Path):
+    """Блокирующий замок на файл — для коротких операций «прочитал-сравнил-записал»."""
+    private_dir(path.parent)
+    handle = path.open("a+b")
+    make_private(path, PRIVATE_FILE)
+    try:
+        wait_lock(handle)
+        try:
+            yield
+        finally:
+            free_lock(handle)
+    finally:
+        handle.close()
+
+
 class Entry:
     def __init__(self, root: Path, key: str) -> None:
         self.folder = folder_for(root, key)

@@ -115,6 +115,10 @@ def run(worker: Worker, options) -> int:
         # Вход проверяется внутри и только когда ход действительно нужен: готовый ответ
         # из лотка отдаётся и без входа — например, пока учётная запись разлогинена.
         result = worker.run(request, retry=options.retry, ensure_login=True)
+    except ValueError as exc:
+        # Ошибка в самом запросе — например, испорченный --session: не про вход.
+        print(f"запрос отклонён: {exc}", file=sys.stderr)
+        return 2
     except RuntimeError as exc:
         print(exc, file=sys.stderr)
         print("почините так: python -m agent_workers login", file=sys.stderr)

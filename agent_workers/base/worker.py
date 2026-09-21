@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .contract import Adapter, Profile, Reply
-from .entry import Entry, digest, hold, let_go, private_dir, registry
+from .entry import Entry, digest, guarded, hold, let_go, private_dir, registry
 from .guard import Guard, LimitPolicy
 from .outbox import Outbox
 from .process import capture, interactive, supervise
@@ -95,12 +95,17 @@ class Worker:
             return 0
 
     def advance(self, session: object, to: int) -> None:
-        """Продвинуть беседу не меньше чем до `to`. Повторный вызов ничего не портит."""
-        if self.generation(session) >= to:
-            return
-        path = self.session_file(session, "gen")
-        private_dir(path.parent)
-        path.write_text(str(to), encoding="utf-8")
+        """Продвинуть беседу не меньше чем до `to`. Повторный вызов ничего не портит.
+
+        Сравнение и запись — под собственным коротким замком: восстановление из папки
+        идёт вне очереди беседы и иначе могло бы откатить номер, записанный позже.
+        """
+        with guarded(self.session_file(session, "gen.lock")):
+            if self.generation(session) >= to:
+                return
+            path = self.session_file(session, "gen")
+            private_dir(path.parent)
+            path.write_text(str(to), encoding="utf-8")
 
     def settle(self, entry: Entry) -> None:
         """Ответ получен — беседа продвинулась. Номер записан в самой папке, поэтому
@@ -118,16 +123,20 @@ class Worker:
             if entry.attempted:
                 # Маркер стоит, а владельца нет: это итог прошлой попытки, а не работа.
                 return self.taken(entry)
+        # Свежая папка — та, в которой ещё не было платного хода. Судим по записи, а не
+        # по флагу retry: повтор по ключу без прошлой попытки — обычный первый ход.
+        fresh = not entry.attempted
         if ensure_login:
             # Готовый ответ выше отдан без входа; проверяем его, только когда ход нужен.
             try:
                 self.check()
             except Exception as exc:
+                if fresh:
+                    self.discard(entry)   # папку завели зря: без состояния её никто не найдёт
                 raise RuntimeError(f"вход не подтверждён: {exc}") from exc
         model = str(request.get("model") or getattr(self.adapter, "model", "") or "")
         # У повтора папка уже занята прежним результатом: ни брони, ни уборки — пока
         # все проверки не пройдены, старую попытку не трогаем, чтобы отказ её не стёр.
-        fresh = not retry
 
         with registry(self.root):
             # Считаем и занимаем место разом: иначе несколько процессов, глядя на один
@@ -163,7 +172,7 @@ class Worker:
             return self.result("aborted", entry, None, before, None,
                                reason="остановка запрошена до запуска")
 
-        if retry:
+        if retry and not fresh:
             entry.restart()   # проверки пройдены — теперь прежнюю попытку можно отодвинуть
         try:
             command = self.adapter.ask(entry, request, self.profile)
