@@ -65,8 +65,11 @@ class Settings:
         return replace(self, overrides={**self.overrides, **given})
 
     def get(self, key: str, default: str = "") -> str:
-        return (self.overrides.get(key) or os.environ.get(key)
-                or self.values.get(key) or default)
+        """Пустое значение задано намеренно: `AGENT_REFUSE_ABOVE=` снимает порог."""
+        for source in (self.overrides, os.environ, self.values):
+            if key in source:
+                return source[key]
+        return default
 
     @property
     def provider(self) -> str:
@@ -94,10 +97,11 @@ class Settings:
     @property
     def max_pending(self) -> int:
         """Сколько готовых и не забранных результатов терпеть, прежде чем встать."""
-        return int(self.get("AGENT_MAX_PENDING", "50"))
+        value = self.get("AGENT_MAX_PENDING", "50").strip()
+        return int(value) if value else 50
 
     @property
     def policy(self) -> LimitPolicy:
-        refuse = self.get("AGENT_REFUSE_ABOVE", "95")
+        refuse = self.get("AGENT_REFUSE_ABOVE", "95").strip()
         return LimitPolicy(refuse_above=float(refuse) if refuse else None,
                            spend_credits=self.get("AGENT_SPEND_CREDITS", "1").lower() not in NO)

@@ -11,10 +11,21 @@ import hashlib
 import json
 import os
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
 RESERVED = (".", "..")
+
+
+class Busy(RuntimeError):
+    """Папкой владеет живой процесс."""
+
+
+class NotRemoved(RuntimeError):
+    """Папку не удалось снести целиком — она снова всплывёт в лотке."""
+
+
 EMPTY = {"state": "prepared", "started": False, "session_id": None, "pid": None}
 
 
@@ -41,10 +52,30 @@ def folder_for(root: Path, key: str) -> Path:
     return folder
 
 
+@contextmanager
+def registry(root: Path):
+    """Замок на каталог ходов: он переживает удаление любой папки внутри.
+
+    Нужен, потому что замок самой папки исчезает вместе с ней: между его снятием и
+    удалением каталога другой процесс успел бы взять папку и начать платный ход,
+    а удаление снесло бы его журналы. Берётся на мгновение — только чтобы взятие
+    папки и её удаление не наложились друг на друга.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    handle = (root / ".registry.lock").open("a+b")
+    wait_lock(handle)
+    try:
+        yield
+    finally:
+        try:
+            free_lock(handle)
+        finally:
+            handle.close()
+
+
 class Entry:
     def __init__(self, root: Path, key: str) -> None:
         self.folder = folder_for(root, key)
-        self.folder.mkdir(parents=True, exist_ok=True)
         self.state_path = self.folder / "state.json"
         self.lock = None
 
@@ -77,6 +108,7 @@ class Entry:
     def _write(self, value: dict) -> None:
         # Через временный файл, и имя у него своё на каждый процесс: два пишущих
         # не должны спорить за один и тот же промежуточный файл.
+        self.folder.mkdir(parents=True, exist_ok=True)
         temporary = self.state_path.with_name(f"state.{os.getpid()}.{uuid4().hex[:8]}.tmp")
         temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(self.state_path)
@@ -104,14 +136,16 @@ class Entry:
         """
         if self.lock is not None:
             return True
-        handle = (self.folder / "owner.lock").open("a+b")
-        try:
-            take_lock(handle)
-        except OSError:
-            handle.close()
-            return False
-        self.lock = handle
-        return True
+        with registry(self.folder.parent):
+            self.folder.mkdir(parents=True, exist_ok=True)
+            handle = (self.folder / "owner.lock").open("a+b")
+            try:
+                take_lock(handle)
+            except OSError:
+                handle.close()
+                return False
+            self.lock = handle
+            return True
 
     def release(self) -> None:
         if self.lock is None:
@@ -144,9 +178,18 @@ class Entry:
         return attempt
 
     def drop(self) -> None:
-        """Забрали — папка не нужна: сносим целиком, вместе с отложенными попытками."""
-        self.release()
-        shutil.rmtree(self.folder, ignore_errors=True)
+        """Забрали — папка не нужна: сносим целиком, вместе с отложенными попытками.
+
+        Под замком каталога: пока идёт удаление, взять эту папку никто не может.
+        Молчать об отказе нельзя — недоснесённая папка снова всплывёт в лотке.
+        """
+        with registry(self.folder.parent):
+            self.release()
+            if not self.folder.exists():
+                return
+            shutil.rmtree(self.folder)
+            if self.folder.exists():
+                raise NotRemoved(f"Папку хода не удалось снести: {self.folder}")
 
 
 if os.name == "nt":
@@ -156,6 +199,10 @@ if os.name == "nt":
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
 
+    def wait_lock(handle) -> None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+
     def free_lock(handle) -> None:
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
@@ -164,6 +211,9 @@ else:
 
     def take_lock(handle) -> None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def wait_lock(handle) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
 
     def free_lock(handle) -> None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)

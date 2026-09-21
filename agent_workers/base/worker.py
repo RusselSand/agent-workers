@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .contract import Adapter, Profile
-from .entry import Entry, digest, folder_for
+from .entry import Busy, Entry, NotRemoved, digest, folder_for
 from .guard import Guard, LimitPolicy
 from .process import capture, interactive, supervise
 
@@ -79,14 +79,14 @@ class Worker:
         waiting = len(self.pending())
         if waiting >= self.max_pending:
             # Лучше встать, чем молча забивать диск текстами, которые никто не забирает.
-            entry.drop()
+            self.discard(entry)
             return self.result("outbox_full", entry, None, None, None,
                                reason=f"не забрано результатов: {waiting}")
 
         before = self.guard.measure("before")
         reason = self.guard.blocked(before)
         if reason:
-            entry.drop()   # в папке ничего нет: ход не начинался
+            self.discard(entry)   # в папке ничего нет: ход не начинался
             return self.result("limit_reached", entry, None, before, None, reason=reason)
 
         command = self.adapter.ask(entry, request, self.profile)
@@ -123,9 +123,15 @@ class Worker:
                 raise ValueError(f"Хода с таким ключом нет: {entry}")
             entry = Entry(self.root, folder.name)
         if not entry.claim():
-            raise RuntimeError(f"Ход {entry.folder.name} выполняется прямо сейчас; "
-                               "забирать его нельзя")
+            raise Busy(f"Ход {entry.folder.name} выполняется прямо сейчас; забирать нельзя")
         entry.drop()
+
+    def discard(self, entry: Entry) -> None:
+        """Уборка после несостоявшегося хода: её отказ не должен ронять ответ вызывающему."""
+        try:
+            entry.drop()
+        except (OSError, NotRemoved) as exc:
+            log.warning("Папку %s убрать не удалось: %s", entry.folder.name, exc)
 
     def finished(self, entry: Entry) -> dict | None:
         """Готовый ответ стоит ноль: отдаём его, не трогая ни лимит, ни состояние."""

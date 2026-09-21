@@ -10,7 +10,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from .base.entry import Entry, digest
+from .base.entry import Busy, Entry, NotRemoved, digest
 from .base.worker import Worker
 from .build import ADAPTERS, build
 from .config import Settings
@@ -59,21 +59,25 @@ def pending(worker: Worker) -> int:
 def collect(worker: Worker, options) -> int:
     """Забрали — сносим. Пока не забрали, результат лежит и ждёт."""
     if options.all:
-        taken, busy = 0, 0
+        taken, busy, failed = 0, 0, []
         for entry in worker.pending():
             try:
                 worker.collect(entry)
                 taken += 1
-            except RuntimeError:
+            except Busy:
                 busy += 1      # кто-то работает с этой папкой: придём в следующий раз
+            except (NotRemoved, OSError) as exc:
+                failed.append(str(exc))
         print(f"забрано: {taken}" + (f", занято: {busy}" if busy else ""))
-        return 0
+        for message in failed:
+            print(message, file=sys.stderr)
+        return 1 if failed else 0
     if not options.key:
         print("нужен ключ хода или --all", file=sys.stderr)
         return 2
     try:
         worker.collect(options.key)
-    except (ValueError, RuntimeError) as exc:
+    except (ValueError, Busy, NotRemoved, OSError) as exc:
         print(exc, file=sys.stderr)     # ключ приходит от человека, трассировка ему ни к чему
         return 2
     print(f"забрано: {options.key}")

@@ -18,7 +18,7 @@ from agent_workers.base import (
     Window,
     Worker,
 )
-from agent_workers.base.entry import Entry, digest, folder_for
+from agent_workers.base.entry import Entry, NotRemoved, digest, folder_for, registry
 
 QUIET = LimitPolicy(settle_reads=1, settle_delay=0)
 
@@ -324,3 +324,81 @@ def test_latecomer_does_not_overwrite_the_live_state(tmp_path):
     assert latecomer.claim() is False           # владения не получил
     assert latecomer.meta["state"] == "running"  # и ничего не переписал
     owner.release()
+
+
+def test_registry_lock_is_exclusive_between_processes(tmp_path):
+    """Замок каталога должен держать чужой процесс, а не только собственный поток."""
+    import subprocess
+    import sys
+
+    probe = Path(__file__).with_name('probe_lock.py')
+    package = Path(__file__).resolve().parents[2]
+    lock = tmp_path / '.registry.lock'
+
+    def ask() -> str:
+        done = subprocess.run([sys.executable, str(probe), str(lock)],
+                              capture_output=True, text=True,
+                              env={**os.environ, 'PYTHONPATH': str(package)})
+        return done.stdout.strip()
+
+    with registry(tmp_path):
+        assert ask() == 'held'
+    assert ask() == 'free'
+
+
+def test_deletion_happens_under_the_registry_lock(tmp_path, profile):
+    """Замок самой папки исчезает вместе с ней, поэтому удаление держит замок каталога."""
+    from contextlib import contextmanager
+
+    import agent_workers.base.entry as entry_module
+
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / 'runs', QUIET)
+    entry = Entry(tmp_path / 'runs', 'ход')
+    entry.claim()
+    entry.update(state='answered')
+    entry.release()
+
+    order = []
+    keep_registry = entry_module.registry
+    keep_rmtree = entry_module.shutil.rmtree
+
+    @contextmanager
+    def watched(root):
+        order.append('замок взят')
+        with keep_registry(root):
+            yield
+        order.append('замок снят')
+
+    def rmtree(path, *args, **kwargs):
+        order.append('удаление')
+        keep_rmtree(path, *args, **kwargs)
+
+    entry_module.registry, entry_module.shutil.rmtree = watched, rmtree
+    try:
+        worker.collect('ход')
+    finally:
+        entry_module.registry = keep_registry
+        entry_module.shutil.rmtree = keep_rmtree
+    assert order[-3:] == ['замок взят', 'удаление', 'замок снят']
+    assert not entry.folder.exists()
+
+
+def test_failed_removal_is_reported_not_swallowed(tmp_path, profile):
+    """Недоснесённая папка снова всплывёт в лотке — молчать об этом нельзя."""
+    import agent_workers.base.entry as entry_module
+
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
+    entry = Entry(tmp_path / "runs", "ход")
+    entry.claim()
+    entry.update(state="answered")
+    entry.release()
+
+    original = entry_module.shutil.rmtree
+    entry_module.shutil.rmtree = lambda *a, **k: None    # как будто удалить не вышло
+    try:
+        with pytest.raises(NotRemoved):
+            worker.collect("ход")
+    finally:
+        entry_module.shutil.rmtree = original
+    assert entry.folder.exists()
+
