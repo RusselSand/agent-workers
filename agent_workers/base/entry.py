@@ -261,17 +261,40 @@ class Entry:
 
         Переносим всё, кроме состояния и замка: что ещё лежит в папке, знает провайдер.
         """
-        attempt = int(self.meta.get("attempt", 0)) + 1
+        previous = self.meta
+        attempt = int(previous.get("attempt", 0)) + 1
         archive = private_dir(self.folder / f"attempt-{attempt}")
         keep = {self.state_path.name, "owner.lock"}
         for path in self.folder.iterdir():
             if path.name in keep or path.name.startswith(("attempt-", "state.")):
                 continue
             path.replace(archive / path.name)
+        # Состояние прошлой попытки кладём рядом с её журналами: если новый ход не
+        # состоится, всё это можно вернуть на место, как будто повтора и не было.
+        atomic_write(archive / "state.json", json.dumps(previous, ensure_ascii=False, indent=2))
         # Всё, что относилось к прошлой попытке — расход, сессия, код возврата, —
         # уезжает вместе с ней: иначе новый ход отчитается чужими цифрами.
         self._write({**EMPTY, "attempt": attempt})
         return attempt
+
+    def rollback(self) -> None:
+        """Повтор не состоялся до запуска CLI: вернуть прежнюю попытку из архива."""
+        attempt = int(self.meta.get("attempt", 0))
+        archive = self.folder / f"attempt-{attempt}"
+        if attempt < 1 or not archive.is_dir():
+            return
+        keep = {self.state_path.name, "owner.lock"}
+        for path in self.folder.iterdir():
+            if path.name in keep or path.name.startswith(("attempt-", "state.")):
+                continue
+            shutil.rmtree(path) if path.is_dir() else path.unlink()   # следы несостоявшегося
+        saved = archive / "state.json"
+        previous = json.loads(saved.read_text(encoding="utf-8")) if saved.is_file() else EMPTY
+        saved.unlink(missing_ok=True)
+        for path in archive.iterdir():
+            path.replace(self.folder / path.name)
+        archive.rmdir()
+        self._write(dict(previous))
 
     def drop(self) -> None:
         """Забрали — папка не нужна: сносим целиком, вместе с отложенными попытками.

@@ -184,3 +184,14 @@ def test_unlimited_credits_without_a_balance_are_still_credits(sample, profile):
     assert credits_of(result["rateLimits"]) is None
     assert unlimited(result["rateLimits"]) is True
 
+
+def test_session_id_must_be_a_real_uuid(tmp_path, profile):
+    from agent_workers.providers.codex import session_id
+
+    misplaced = "01a0c345-2cd1-70e2-8daa7193e928f5d9-"
+    for bad in ("-" * 36, misplaced, "01a0c3452cd170e28daa7193e928f5d9-xx"):
+        with pytest.raises(ValueError, match="сессии"):
+            adapter().ask(Entry(tmp_path, "run"), {"user": "x", "session": bad}, profile)
+    canonical = "01a0c345-2cd1-70e2-8daa-7193e928f5d9"
+    assert session_id(canonical.upper()) == canonical
+

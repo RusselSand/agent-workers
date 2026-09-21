@@ -11,7 +11,7 @@ token_count. Он может быть устаревшим, поэтому по�
 from __future__ import annotations
 
 import json
-import re
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -28,7 +28,24 @@ ENV_HOME = "CODEX_HOME"
 
 APP_SERVER = ("app-server", "--listen", "stdio://")
 SUBSCRIPTION = ("chatgpt", "chatgptAuthTokens")
-SESSION = re.compile(r"^[0-9a-fA-F-]{36}$")
+
+
+def session_id(value: object) -> str:
+    """Идентификатор сессии Codex — настоящий UUID, а не любые 36 знаков из hex и дефисов.
+
+    Иначе «------------------------------------» проходил бы проверку, помечал ход
+    начатым и падал уже внутри `codex exec resume` — оплаченной незавершённой попыткой
+    вместо честного отказа до запуска.
+    """
+    text = str(value).strip().lower()
+    try:
+        parsed = uuid.UUID(text)
+    except (ValueError, AttributeError, TypeError):
+        raise ValueError(f"Неверный идентификатор сессии Codex: {value!r}") from None
+    if str(parsed) != text:
+        # uuid.UUID прощает дефисы не на месте и фигурные скобки — CLI не простит.
+        raise ValueError(f"Неверный идентификатор сессии Codex: {value!r}")
+    return text
 
 SOURCE = "openai, developers.openai.com/api/docs/pricing (снято 2026-09-21)"
 
@@ -205,9 +222,7 @@ class CodexAdapter:
         argv = [self.executable, "-a", "never", "exec", "-s", self.sandbox]
         session = request.get("session")
         if session:
-            if not SESSION.fullmatch(str(session)):
-                raise ValueError("Неверный идентификатор сессии Codex")
-            argv += ["resume", str(session)]
+            argv += ["resume", session_id(session)]
         argv += ["--ignore-user-config", "--skip-git-repo-check",
                  "-m", model, "--json",
                  "-o", str(entry.folder / "summary.txt"),

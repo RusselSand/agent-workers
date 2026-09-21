@@ -940,3 +940,44 @@ def test_readers_never_see_an_empty_or_backwards_generation(tmp_path, profile):
     assert worker.generation("беседа") == 59
     assert not list(worker.session_file("беседа", "gen").parent.glob("*.tmp"))
 
+
+def test_initial_turn_stops_advertising_its_session_once_it_moved_on(tmp_path, profile):
+    """Ответ первого хода из лотка не должен звать продолжать беседу, где уже есть чужие ходы."""
+    worker = Worker(FakeAdapter(tmp_path, percent=[1.0] * 10), profile, tmp_path / "runs", QUIET)
+    first = worker.run({"user": "начало"})
+    assert first["state"] == "answered" and first["reply"].session_id == "session-1"
+    assert worker.run({"user": "начало"})["reply"].session_id == "session-1"   # пока не ушла
+
+    worker.run({"user": "дальше", "session": "session-1"})                    # беседа ушла
+    stale = worker.run({"user": "начало"})
+    assert stale["state"] == "resumed" and stale["reply"].text == "начало"   # ответ тот же
+    assert stale["reply"].session_id is None                                  # а продолжать — нет
+    assert "продвинулась" in stale["reply"].diagnostic
+
+
+def test_failed_request_construction_restores_the_previous_attempt(tmp_path, profile):
+    """Повтор упал на сборке запроса: прежний результат возвращается на место."""
+    class Flaky(FakeAdapter):
+        fail = False
+
+        def ask(self, entry, request, profile):
+            if self.fail:
+                raise OSError("не записался файл задания")
+            return super().ask(entry, request, profile)
+
+    adapter = Flaky(tmp_path, percent=[1.0] * 10)
+    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
+    first = worker.run({"user": "вопрос"}, key="задача")
+    assert first["state"] == "answered"
+
+    adapter.fail = True
+    with pytest.raises(OSError):
+        worker.run({"user": "вопрос"}, key="задача", retry=True)
+    adapter.fail = False
+
+    assert not (first["entry"].folder / "attempt-1").exists()      # архива не осталось
+    assert first["entry"].meta["state"] == "answered"
+    assert [e.folder for e in worker.pending()] == [first["entry"].folder]
+    kept = worker.run({"user": "вопрос"}, key="задача")
+    assert kept["state"] == "resumed" and kept["reply"].text == "вопрос"
+

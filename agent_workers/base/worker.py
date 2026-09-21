@@ -15,7 +15,7 @@ import logging
 import os
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .contract import Adapter, Profile, Reply
@@ -185,14 +185,15 @@ class Worker:
             entry.restart()   # проверки пройдены — теперь прежнюю попытку можно отодвинуть
         try:
             command = self.adapter.ask(entry, request, self.profile)
-        except BaseException as exc:
+        except BaseException:
             if fresh:
                 # Место уже занято, а хода не будет — включая Ctrl+C в этот момент:
                 # иначе кривые задания и обрывы тихо забьют лоток.
                 self.discard(entry)
             else:
-                # Архив прежней попытки цел; папка остаётся видимой в лотке.
-                entry.update(state="incomplete", diagnostic=f"ask_error: {type(exc).__name__}")
+                # Повтор не дошёл до запуска: прежний результат возвращается на место,
+                # как будто повтора и не просили, — он всё ещё доставляем.
+                entry.rollback()
             raise
         session = request.get("session")
         if session:
@@ -216,6 +217,12 @@ class Worker:
         entry.update(state=state, session_id=reply.session_id, diagnostic=reply.diagnostic)
         if state == "answered":
             self.settle(entry)
+            if not session and reply.session_id:
+                # Первый ход завёл беседу. Запоминаем, на каком её номере он родился:
+                # когда беседа уйдёт дальше, его идентификатор уже нельзя отдавать как
+                # «продолжай отсюда» — там будут и чужие ходы.
+                entry.update(born=reply.session_id,
+                             born_generation=self.generation(reply.session_id))
         if outcome.interruption == "stopped":
             # Нас попросили остановиться: не задерживаем выход паузами и запусками CLI.
             return self.result(state, entry, reply, before, None)
@@ -268,7 +275,20 @@ class Worker:
         if not reply.complete:
             return None
         self.settle(entry)   # доделать продвижение беседы, если процесс упал до него
-        return self.result("resumed", entry, reply, None, None)
+        return self.result("resumed", entry, self.served(entry, reply), None, None)
+
+    def served(self, entry: Entry, reply: Reply) -> Reply:
+        """Ответ из лотка. Если беседа, которую он завёл, с тех пор ушла дальше,
+        его идентификатор больше не значит «продолжай отсюда» — и мы его не отдаём."""
+        meta = entry.meta
+        born = meta.get("born")
+        if not born or not isinstance(meta.get("born_generation"), int):
+            return reply
+        if self.generation(born) == meta["born_generation"]:
+            return reply
+        note = "беседа с тех пор продвинулась: продолжать с этого ответа уже нельзя"
+        return replace(reply, session_id=None,
+                       diagnostic="; ".join(part for part in (reply.diagnostic, note) if part))
 
     def taken(self, entry: Entry) -> dict:
         """Прошлая попытка кончилась ничем: отдаём её итог, а не «всё ещё идёт»."""
@@ -277,7 +297,7 @@ class Worker:
         if reply.complete:
             entry.update(state="answered")
             self.settle(entry)
-            return self.result("resumed", entry, reply, None, None)
+            return self.result("resumed", entry, self.served(entry, reply), None, None)
         if state in UNFINISHED:
             # Записываем итог: так папка попадёт в лоток, и её можно будет забрать.
             state = "incomplete"
