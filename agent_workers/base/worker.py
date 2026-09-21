@@ -53,7 +53,7 @@ class Worker:
         return interactive(self.adapter.logout(self.profile))
 
     def run(self, request: Mapping[str, object], *, key: str | None = None,
-            pulse=None, stop=None, retry: bool = False) -> dict:
+            pulse=None, stop=None, retry: bool = False, ensure_login: bool = False) -> dict:
         entry = Entry(self.root, key or self.key_for(request))
         if not entry.claim():
             # Папкой владеет живой процесс. Ни повторять, ни двигать его журналы нельзя:
@@ -61,12 +61,13 @@ class Worker:
             return self.result("in_progress", entry, None, None, None,
                                reason="ход уже выполняется другим процессом")
         try:
-            return self.attempt(entry, request, pulse=pulse, stop=stop, retry=retry)
+            return self.attempt(entry, request, pulse=pulse, stop=stop, retry=retry,
+                                ensure_login=ensure_login)
         finally:
             entry.release()
 
     def attempt(self, entry: Entry, request: Mapping[str, object], *,
-                pulse=None, stop=None, retry: bool = False) -> dict:
+                pulse=None, stop=None, retry: bool = False, ensure_login: bool = False) -> dict:
         if retry:
             entry.restart()
 
@@ -76,6 +77,13 @@ class Worker:
         if entry.attempted:
             # Маркер стоит, а владельца нет: это итог прошлой попытки, а не работа.
             return self.taken(entry)
+        if ensure_login:
+            # Готовый ответ выше отдан без входа; проверяем его, только когда ход нужен.
+            try:
+                self.check()
+            except Exception as exc:
+                raise RuntimeError(f"вход не подтверждён: {exc}") from exc
+        model = str(request.get("model") or getattr(self.adapter, "model", "") or "")
 
         with registry(self.root):
             # Считаем и занимаем место разом: иначе несколько процессов, глядя на один
@@ -92,7 +100,7 @@ class Worker:
             self.discard(entry)
             return broken
 
-        before = self.guard.measure("before")
+        before = self.guard.measure("before", model=model)
         # Выключенный замер — это решение вызывающего, а не неизвестный лимит.
         reason = self.guard.blocked(before) if self.policy.before else None
         if reason:
@@ -101,19 +109,29 @@ class Worker:
 
         try:
             command = self.adapter.ask(entry, request, self.profile)
-        except Exception:
-            # Место уже занято, а хода не будет: иначе кривые задания забьют лоток.
+        except BaseException:
+            # Место уже занято, а хода не будет — включая Ctrl+C в этот момент:
+            # иначе кривые задания и обрывы тихо забьют лоток.
             self.discard(entry)
             raise
         entry.update(state="running", pid=os.getpid())
-        outcome = supervise(command, stdout=entry.stdout, stderr=entry.stderr,
-                            pulse=pulse, stop=stop, timeout=self.timeout)
-        entry.update(state="captured", pid=None, returncode=outcome.returncode,
-                     interruption=outcome.interruption)
-        reply = self.adapter.reply(entry, self.profile)
+        try:
+            outcome = supervise(command, stdout=entry.stdout, stderr=entry.stderr,
+                                pulse=pulse, stop=stop, timeout=self.timeout)
+            entry.update(state="captured", pid=None, returncode=outcome.returncode,
+                         interruption=outcome.interruption)
+            reply = self.adapter.reply(entry, self.profile)
+        except BaseException as exc:
+            # Ctrl+C или сбой разбора: папка обязана стать «незавершённой», а не зависнуть
+            # в «идёт» — иначе она занимает место в лотке, а забрать её нельзя.
+            entry.update(state="incomplete", pid=None, diagnostic=type(exc).__name__)
+            raise
         state = "answered" if reply.complete else "incomplete"
         entry.update(state=state, session_id=reply.session_id, diagnostic=reply.diagnostic)
-        after = self.guard.measure("after", session=reply.session_id)
+        if outcome.interruption == "stopped":
+            # Нас попросили остановиться: не задерживаем выход паузами и запусками CLI.
+            return self.result(state, entry, reply, before, None)
+        after = self.guard.measure("after", session=reply.session_id, model=model)
         return self.result(state, entry, reply, before, after)
 
     def key_for(self, request: Mapping[str, object]) -> str:
@@ -151,11 +169,15 @@ class Worker:
         state = entry.meta.get("state") or "incomplete"
         reply = self.adapter.reply(entry, self.profile)
         if reply.complete:
+            entry.update(state="answered")
             return self.result("resumed", entry, reply, None, None)
+        if state in UNFINISHED:
+            # Записываем итог: так папка попадёт в лоток, и её можно будет забрать.
+            state = "incomplete"
+            entry.update(state=state, pid=None)
         # Повтор — только по явной просьбе: автоматика иначе будет бесконечно
         # переделывать то, что уже стоило денег.
-        return self.result("incomplete" if state in UNFINISHED else state, entry, reply,
-                           None, None,
+        return self.result(state, entry, reply, None, None,
                            reason="прошлая попытка не завершилась; повтор — run(..., retry=True)")
 
     def result(self, state, entry, reply, before, after, *, reason=None) -> dict:

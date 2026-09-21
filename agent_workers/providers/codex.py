@@ -11,26 +11,20 @@ token_count. Он может быть устаревшим, поэтому по�
 from __future__ import annotations
 
 import json
-import os
 import re
-import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from typing import ClassVar
 
 from ..base.channel import Channel
 from ..base.contract import Command, Cost, Limits, Profile, Rates, Reply, Usage, Window
-from ..base.pricing import estimate
+from . import common
+from .common import count, decimal, moment, number
 
 ENV_HOME = "CODEX_HOME"
-
-ALLOWED = {"APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "HOME",
-           "TEMP", "TMP", "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC", "PATH", "PATHEXT",
-           "PROGRAMFILES", "PROGRAMW6432", "PROGRAMFILES(X86)", "WINDIR", "LANG",
-           "PYTHONUTF8", "TERM", "TZ"}
 
 APP_SERVER = ("app-server", "--listen", "stdio://")
 SUBSCRIPTION = ("chatgpt", "chatgptAuthTokens")
@@ -53,18 +47,6 @@ PRICES = {
 }
 
 
-def number(value) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool)
-
-
-def moment(value) -> datetime | None:
-    if number(value):
-        return datetime.fromtimestamp(value, UTC)
-    if isinstance(value, str) and value:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return None
-
-
 def length(minutes) -> timedelta | None:
     return timedelta(minutes=minutes) if number(minutes) and minutes > 0 else None
 
@@ -79,11 +61,7 @@ def bucket_windows(buckets: Mapping, *, used: str, duration: str, resets: str):
 
 
 def credits_of(raw: Mapping) -> Decimal | None:
-    balance = (raw.get("credits") or {}).get("balance")
-    try:
-        return Decimal(balance) if balance is not None else None
-    except InvalidOperation:
-        return None
+    return decimal((raw.get("credits") or {}).get("balance"))
 
 
 def applicable(buckets: Mapping, model: str) -> dict:
@@ -141,10 +119,6 @@ def rate_limits(text: str) -> dict | None:
     return snapshot_of(text)[0]
 
 
-def count(value) -> int:
-    return int(value) if isinstance(value, int) and not isinstance(value, bool) else 0
-
-
 def tokens_of(usage: Mapping) -> Usage:
     """input_tokens здесь — весь запрос, включая прочитанное из кеша.
 
@@ -192,19 +166,15 @@ class CodexAdapter:
     name: ClassVar[str] = "codex"
 
     def __post_init__(self) -> None:
-        self.executable = (self.executable or os.environ.get("AGENT_CODEX_BINARY")
-                           or shutil.which("codex.exe") or shutil.which("codex"))
-        if not self.executable or not Path(self.executable).is_file():
-            raise RuntimeError("Codex CLI не найден")
+        self.executable = common.find_executable(self.executable, "AGENT_CODEX_BINARY",
+                                                 "codex.exe", "codex")
 
     def fingerprint(self) -> Mapping[str, str]:
         # Усилие и песочница уходят в командную строку — значит влияют на ответ.
         return {"model": self.model, "effort": self.effort, "sandbox": self.sandbox}
 
     def environment(self, profile: Profile) -> Mapping[str, str]:
-        profile.home.mkdir(parents=True, exist_ok=True)
-        base = {k: v for k, v in os.environ.items() if k.upper() in ALLOWED}
-        return {**base, ENV_HOME: str(profile.home)}
+        return common.environment(profile, ENV_HOME)
 
     def check(self, profile: Profile) -> Command:
         return Command((self.executable, "login", "status"), self.environment(profile),
@@ -278,16 +248,18 @@ class CodexAdapter:
 
     def price(self, reply: Reply) -> Cost | None:
         """Своей цены Codex не сообщает — считаем по таблице."""
-        rates = PRICES.get(str(reply.model or ""))
-        return estimate(reply.tokens, rates) if rates and reply.tokens else None
+        return common.table_price(reply, PRICES)
 
-    def limits(self, profile: Profile, *, session: str | None = None) -> Limits | None:
+    def limits(self, profile: Profile, *, session: str | None = None,
+               model: str | None = None) -> Limits | None:
+        # Модель берём ту, что пойдёт в ход: у неё может быть своя корзина лимита.
+        model = model or self.model
         try:
             result = self.rate_limits(profile)
         except Exception:
             # Протокол app-server помечен экспериментальным: его отказ — не авария.
             return self.snapshot(profile, session=session)
-        windows = rpc_windows(result, self.model)
+        windows = rpc_windows(result, model)
         if not windows:
             return self.snapshot(profile, session=session)
         return Limits(self.name, profile.name, windows, datetime.now(UTC), "app-server", True,

@@ -66,7 +66,7 @@ class FakeAdapter:
         from decimal import Decimal
         return Cost(Decimal("0.01"), "USD", "table")
 
-    def limits(self, profile, *, session=None):
+    def limits(self, profile, *, session=None, model=None):
         self.reads += 1
         return limits(self.percent.pop(0) if self.percent else 0.0)
 
@@ -288,7 +288,7 @@ def test_stale_snapshot_counts_as_unknown(tmp_path, profile):
 
 def test_failed_measurement_does_not_break_the_turn(tmp_path, profile):
     class Broken(FakeAdapter):
-        def limits(self, profile, *, session=None):
+        def limits(self, profile, *, session=None, model=None):
             raise OSError("зонд недоступен")
 
     result = Worker(Broken(tmp_path), profile, tmp_path / "runs", QUIET).run({"user": "привет"})
@@ -537,4 +537,102 @@ def test_run_folder_is_readable_only_by_its_owner(tmp_path):
         assert (entry.folder / "invocation" / "input.txt").stat().st_mode & 0o077 == 0
     finally:
         entry.release()
+
+
+def test_interrupt_while_building_the_request_frees_the_slot(tmp_path, profile):
+    class Interrupted(FakeAdapter):
+        def ask(self, entry, request, profile):
+            raise KeyboardInterrupt
+
+    worker = Worker(Interrupted(tmp_path), profile, tmp_path / "runs", QUIET, max_pending=1)
+    with pytest.raises(KeyboardInterrupt):
+        worker.run({"user": "раз"})
+    assert worker.outbox.occupied() == 0
+
+
+def test_interrupted_turn_ends_up_in_the_outbox_not_in_limbo(tmp_path, profile):
+    """Ctrl+C посреди хода: папка становится «незавершённой», её видно и можно забрать."""
+    import agent_workers.base.worker as worker_module
+
+    keep = worker_module.supervise
+
+    def broken_supervise(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    worker_module.supervise = broken_supervise
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET, max_pending=1)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            worker.run({"user": "два"})
+    finally:
+        worker_module.supervise = keep
+
+    stuck = worker.pending()
+    assert len(stuck) == 1 and stuck[0].meta["state"] == "incomplete"
+    worker.collect(stuck[0])                      # а не вечное занятое место
+    assert worker.outbox.occupied() == 0
+
+
+def test_dead_attempt_becomes_collectable(tmp_path, profile):
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
+    entry = Entry(tmp_path / "runs", worker.key_for({"user": "привет"}))
+    entry.mark_started()
+    entry.update(state="running")
+    assert worker.pending() == []
+    assert worker.run({"user": "привет"})["state"] == "incomplete"
+    assert [e.folder for e in worker.pending()] == [entry.folder]
+
+
+def test_clock_jitter_in_reset_time_is_not_a_reset(tmp_path, profile):
+    """Микросекунды времени сброса плавают от замера к замеру — это не новый отсчёт."""
+    guard = Guard(FakeAdapter(tmp_path), profile, QUIET)
+    moment = datetime.now(UTC)
+    before = Limits("fake", "t", (Window("session", 12.0, resets_at=moment),), moment, "t", True)
+    after = Limits("fake", "t", (Window("session", 13.0,
+                                        resets_at=moment + timedelta(microseconds=5537)),),
+                   moment, "t", True)
+    assert guard.spent(before, after) == {"session": 1.0}
+
+
+def test_measurement_uses_the_model_of_the_request(tmp_path, profile):
+    class Watching(FakeAdapter):
+        model = "по-умолчанию"
+        asked_models: list = []
+
+        def limits(self, profile, *, session=None, model=None):
+            self.asked_models.append(model)
+            return super().limits(profile, session=session, model=model)
+
+    adapter = Watching(tmp_path, percent=[1.0, 1.0, 1.0])
+    Worker(adapter, profile, tmp_path / "runs", QUIET).run({"user": "ок", "model": "другая"})
+    assert adapter.asked_models and set(adapter.asked_models) == {"другая"}
+
+
+def test_no_measurement_after_a_requested_stop(tmp_path, profile):
+    """Нас попросили остановиться — не тянем выход паузами и запусками CLI."""
+    import agent_workers.base.worker as worker_module
+    from agent_workers.base.process import Outcome
+
+    keep = worker_module.supervise
+    worker_module.supervise = lambda *a, **k: Outcome(None, "stopped")
+    adapter = FakeAdapter(tmp_path, percent=[1.0, 2.0, 3.0])
+    try:
+        result = Worker(adapter, profile, tmp_path / "runs", QUIET).run({"user": "ок"})
+    finally:
+        worker_module.supervise = keep
+    assert result["after"] is None and adapter.reads == 1
+
+
+def test_cached_reply_is_served_even_when_login_cannot_be_checked(tmp_path, profile):
+    class LoggedOut(FakeAdapter):
+        def verify(self, captured):
+            raise RuntimeError("выхода из учётной записи")
+
+    adapter = LoggedOut(tmp_path)
+    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
+    worker.run({"user": "привет"})                                  # ответ уже в лотке
+    served = worker.run({"user": "привет"}, ensure_login=True)
+    assert served["state"] == "resumed"                             # вход не понадобился
+    with pytest.raises(RuntimeError, match="вход не подтверждён"):
+        worker.run({"user": "новый вопрос"}, ensure_login=True)     # а тут нужен
 

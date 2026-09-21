@@ -163,3 +163,15 @@ def test_turn_usage_is_saved_before_the_session_moves_on(sample, profile, tmp_pa
     again = adapter().reply(entry, profile)
     assert again.tokens.input == 13773                      # свой расход, а не чужого хода
 
+
+def test_proxy_and_certificates_reach_the_subprocess(monkeypatch, profile):
+    from agent_workers.providers import common
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.local:3128")
+    monkeypatch.setenv("NODE_EXTRA_CA_CERTS", "/etc/ssl/corp.pem")
+    monkeypatch.setenv("AGENT_SECRET", "не должно утечь")
+    env = common.environment(profile, "CODEX_HOME")
+    assert env["HTTPS_PROXY"] == "http://proxy.local:3128"
+    assert env["NODE_EXTRA_CA_CERTS"] == "/etc/ssl/corp.pem"
+    assert "AGENT_SECRET" not in env and env["CODEX_HOME"] == str(profile.home)
+

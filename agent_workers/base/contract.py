@@ -149,8 +149,10 @@ class Adapter(Protocol):
     def price(self, reply: Reply) -> Cost | None:
         """Во что ход обошёлся бы по API. None — если модель незнакома таблице."""
 
-    def limits(self, profile: Profile, *, session: str | None = None) -> Limits | None:
+    def limits(self, profile: Profile, *, session: str | None = None,
+               model: str | None = None) -> Limits | None:
         """Готовый замер или None, если у провайдера нет способа его получить.
 
+        model — модель, которая пойдёт в ход: лимит считается по её корзине.
         Процессы адаптер запускает только примитивами базы: process.capture и Channel.
         """

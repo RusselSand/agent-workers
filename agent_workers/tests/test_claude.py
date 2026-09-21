@@ -101,3 +101,35 @@ def test_continuation_asks_for_the_same_session(profile, tmp_path):
     command = adapter().ask(entry, {"user": "дальше", "session": "сессия-1"}, profile)
     assert command.argv[command.argv.index("--resume") + 1] == "сессия-1"
 
+
+def test_windows_of_other_models_do_not_limit_us(sample):
+    payload = json.loads(sample("claude-get-usage.json"))["rate_limits"]
+    assert [w.name for w in control_windows(payload, "claude-opus-5")] == ["session", "weekly_all"]
+    assert [w.name for w in control_windows(payload, "claude-fable-5-1")] == [
+        "session", "weekly_all", "weekly_scoped:fable"]
+    assert len(control_windows(payload)) == 3      # модель не названа — не фильтруем
+
+
+def test_error_result_keeps_its_text_and_paid_tokens(profile, tmp_path):
+    entry = Entry(tmp_path, "run")
+    entry.write("stdout.jsonl", json.dumps({
+        "type": "result", "is_error": True, "result": "Rate limit reached for claude-opus-5",
+        "session_id": "s", "usage": {"input_tokens": 500, "output_tokens": 0},
+        "total_cost_usd": 0.0025}))
+    reply = adapter().reply(entry, profile)
+    assert reply.complete is False
+    assert "Rate limit reached" in reply.diagnostic
+    assert reply.tokens.input == 500 and reply.usage["total_cost_usd"] == 0.0025
+
+
+def test_missing_system_prompt_is_empty_not_the_word_none(profile, tmp_path):
+    entry = Entry(tmp_path, "run")
+    adapter().ask(entry, {"user": "привет", "system": None}, profile)
+    assert entry.read("invocation/system.md") == ""
+
+
+def test_partial_message_stream_is_not_requested(profile, tmp_path):
+    entry = Entry(tmp_path, "run")
+    argv = adapter().ask(entry, {"user": "привет"}, profile).argv
+    assert "--include-partial-messages" not in argv
+

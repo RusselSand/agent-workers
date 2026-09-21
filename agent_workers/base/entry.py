@@ -82,14 +82,14 @@ def registry(root: Path):
     private_dir(root)
     handle = (root / ".registry.lock").open("a+b")
     make_private(root / ".registry.lock", PRIVATE_FILE)
-    wait_lock(handle)
     try:
-        yield
-    finally:
+        wait_lock(handle)   # внутри try: не взяли замок — не потеряем дескриптор
         try:
-            free_lock(handle)
+            yield
         finally:
-            handle.close()
+            free_lock(handle)
+    finally:
+        handle.close()
 
 
 class Entry:
@@ -222,8 +222,15 @@ if os.name == "nt":
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
 
     def wait_lock(handle) -> None:
+        # LK_LOCK не ждёт бесконечно: сдаётся примерно через десять секунд с OSError.
+        # Удаление большой папки под замком может идти дольше — ждём, сколько нужно.
         handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        while True:
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                return
+            except OSError:
+                continue
 
     def free_lock(handle) -> None:
         handle.seek(0)

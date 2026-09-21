@@ -112,12 +112,13 @@ def run(worker: Worker, options) -> int:
         return 0
 
     try:
-        worker.check()   # бесплатно и до траты: без входа CLI ответит невнятной ошибкой
-    except Exception as exc:
-        print(f"{exc}\nпочините так: python -m agent_workers login", file=sys.stderr)
+        # Вход проверяется внутри и только когда ход действительно нужен: готовый ответ
+        # из лотка отдаётся и без входа — например, пока учётная запись разлогинена.
+        result = worker.run(request, retry=options.retry, ensure_login=True)
+    except RuntimeError as exc:
+        print(exc, file=sys.stderr)
+        print("почините так: python -m agent_workers login", file=sys.stderr)
         return 2
-
-    result = worker.run(request, retry=options.retry)
     state = result["state"]
     if state == "limit_reached":
         print("ход не начат: " + result["reason"], file=sys.stderr)

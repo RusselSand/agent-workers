@@ -7,9 +7,13 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from .contract import Adapter, Limits, Profile
+from .contract import Adapter, Limits, Profile, Window
 
 log = logging.getLogger(__name__)
+
+# Некоторые CLI считают время сброса от момента ответа: микросекунды двух замеров
+# разные. Настоящий сброс сдвигает его на целое окно — часы и дни, а не доли секунды.
+JITTER = timedelta(minutes=1)
 
 
 @dataclass
@@ -33,7 +37,9 @@ class Guard:
     policy: LimitPolicy = field(default_factory=LimitPolicy)
     sleep: object = time.sleep
 
-    def measure(self, phase: str, *, session: str | None = None) -> Limits | None:
+    def measure(self, phase: str, *, session: str | None = None,
+                model: str | None = None) -> Limits | None:
+        """model — модель, которая пойдёт в ход: лимит считается по её корзине."""
         if not (self.policy.before if phase == "before" else self.policy.after):
             return None
         reads = max(1, self.policy.settle_reads) if phase == "after" else 1
@@ -42,7 +48,8 @@ class Guard:
             if phase == "after" and self.policy.settle_delay:
                 self.sleep(self.policy.settle_delay)
             try:
-                latest = self.adapter.limits(self.profile, session=session) or latest
+                latest = self.adapter.limits(self.profile, session=session,
+                                             model=model) or latest
             except Exception as exc:
                 # Замер — не цель работы: его отказ не должен ронять сам ход.
                 log.warning("Замер лимита (%s) не удался: %s", phase, type(exc).__name__)
@@ -72,12 +79,19 @@ class Guard:
         spent = {}
         for window in after.windows:
             earlier = was.get(window.name)
-            if earlier is None or earlier.resets_at != window.resets_at:
+            if earlier is None or rolled_over(earlier, window):
                 continue
             delta = round(window.used_percent - earlier.used_percent, 3)
             if delta >= 0:
                 spent[window.name] = delta
         return spent
+
+
+def rolled_over(earlier: Window, later: Window) -> bool:
+    """Сброс узнаём по заметному сдвигу времени сброса вперёд, а не по неравенству."""
+    if earlier.resets_at is None or later.resets_at is None:
+        return False
+    return later.resets_at - earlier.resets_at > JITTER
 
 
 def now() -> datetime:

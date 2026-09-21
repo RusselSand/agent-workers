@@ -10,26 +10,20 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 from typing import ClassVar
 
 from ..base.channel import Channel
 from ..base.contract import Command, Cost, Limits, Profile, Rates, Reply, Usage, Window
-from ..base.pricing import estimate
 from ..base.process import capture
+from . import common
+from .common import count, moment, number
 
 ENV_HOME = "CLAUDE_CONFIG_DIR"
-
-# Ключи проекта в подпроцесс не уезжают: пропускаем только то, без чего CLI не живёт.
-ALLOWED = {"APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "HOME",
-           "TEMP", "TMP", "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC", "PATH", "PATHEXT",
-           "PROGRAMFILES", "PROGRAMW6432", "PROGRAMFILES(X86)", "WINDIR", "LANG",
-           "PYTHONUTF8", "TERM", "TZ", "CLAUDE_CODE_OAUTH_TOKEN", "DISABLE_AUTOUPDATER"}
+EXTRA_ENV = {"CLAUDE_CODE_OAUTH_TOKEN", "DISABLE_AUTOUPDATER"}
 
 SUBSCRIPTIONS = ("pro", "max", "team", "enterprise")
 
@@ -92,49 +86,59 @@ def last_json(text: str) -> dict:
     raise ValueError("В выводе Claude нет JSON")
 
 
-def moment(value) -> datetime | None:
-    if not isinstance(value, str) or not value:
-        return None
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
-
-
-def number(value) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool)
-
-
 def slug(value: str) -> str:
     return re.sub(r"[^a-z0-9_-]+", "_", value.lower()).strip("_")[:60]
+
+
+def scoped_model(row: Mapping) -> str | None:
+    """Имя модели, к которой привязано окно, или None для окна на весь аккаунт."""
+    model = (row.get("scope") or {}).get("model") or {}
+    return model.get("display_name") or model.get("id") or None
+
+
+def concerns(scoped: str | None, model: str) -> bool:
+    """Окно на весь аккаунт касается всех; окно модели — только её самой.
+
+    Управляющий протокол называет модель коротко («Fable», «Sonnet»), а в настройках
+    она идёт полным именем («claude-fable-5-1»), поэтому сравниваем по вхождению.
+    """
+    if not scoped or not model:
+        return True
+    return slug(scoped) in slug(model)
 
 
 def row_name(row: Mapping) -> str:
     """session · weekly_all · окно, привязанное к модели -> weekly_scoped:fable"""
     kind = str(row.get("kind") or "window")
-    model = ((row.get("scope") or {}).get("model") or {}).get("display_name")
+    model = scoped_model(row)
     return kind + ":" + slug(model) if model else kind
 
 
-def control_windows(rate_limits: Mapping) -> tuple[Window, ...]:
+def control_windows(rate_limits: Mapping, model: str = "") -> tuple[Window, ...]:
     """Новая форма — самоописательный список limits[]; старая — окна отдельными ключами.
 
-    Список предпочтительнее: новое окно приезжает в нём строкой, а не ключом, который
-    здесь пришлось бы заводить руками.
+    Окна чужих моделей отбрасываем: их процент ограничивает не нас, а Guard берёт
+    максимум по всему, что ему отдали.
     """
     rows = rate_limits.get("limits")
     if isinstance(rows, list) and rows:
         return tuple(Window(row_name(row), float(row["percent"]),
                             GROUPS.get(str(row.get("group"))), moment(row.get("resets_at")))
-                     for row in rows if number(row.get("percent")))
+                     for row in rows
+                     if number(row.get("percent")) and concerns(scoped_model(row), model))
     windows = []
     for key, length in LEGACY.items():
         value = rate_limits.get(key)
-        if isinstance(value, dict) and number(value.get("utilization")):
+        family = key.removeprefix("seven_day_") if key.startswith("seven_day_") else None
+        if isinstance(value, dict) and number(value.get("utilization")) \
+                and concerns(family, model):
             windows.append(Window(key, float(value["utilization"]), length,
                                   moment(value.get("resets_at"))))
     for value in rate_limits.get("model_scoped") or []:
-        if number(value.get("utilization")):
-            windows.append(Window("model:" + slug(str(value.get("display_name", "?"))),
-                                  float(value["utilization"]), timedelta(days=7),
-                                  moment(value.get("resets_at"))))
+        name = str(value.get("display_name", "?"))
+        if number(value.get("utilization")) and concerns(name, model):
+            windows.append(Window("model:" + slug(name), float(value["utilization"]),
+                                  timedelta(days=7), moment(value.get("resets_at"))))
     return tuple(windows)
 
 
@@ -147,13 +151,14 @@ def window_name(label: str) -> str:
     return "week" if inner[1] == "all models" else "week:" + inner[1]
 
 
-def usage_windows(text: str) -> tuple[Window, ...]:
-    return tuple(Window(window_name(label), float(percent), resets_hint=(resets or None))
-                 for label, percent, resets in USAGE.findall(text))
-
-
-def count(value) -> int:
-    return int(value) if isinstance(value, int) and not isinstance(value, bool) else 0
+def usage_windows(text: str, model: str = "") -> tuple[Window, ...]:
+    windows = []
+    for label, percent, resets in USAGE.findall(text):
+        name = window_name(label)
+        scoped = name.partition(":")[2] or None
+        if concerns(scoped, model):
+            windows.append(Window(name, float(percent), resets_hint=(resets or None)))
+    return tuple(windows)
 
 
 def tokens_of(usage: Mapping) -> Usage:
@@ -175,6 +180,12 @@ def canonical(usage: Mapping) -> str | None:
     return None
 
 
+def terminal_usage(terminal: Mapping) -> dict:
+    return {**(terminal.get("usage") or {}),
+            "total_cost_usd": terminal.get("total_cost_usd"),
+            "modelUsage": terminal.get("modelUsage") or {}}
+
+
 @dataclass
 class ClaudeAdapter:
     executable: str | None = None
@@ -182,18 +193,14 @@ class ClaudeAdapter:
     name: ClassVar[str] = "claude"
 
     def __post_init__(self) -> None:
-        self.executable = (self.executable or os.environ.get("AGENT_CLAUDE_BINARY")
-                           or shutil.which("claude.exe") or shutil.which("claude"))
-        if not self.executable or not Path(self.executable).is_file():
-            raise RuntimeError("Claude Code не найден")
+        self.executable = common.find_executable(self.executable, "AGENT_CLAUDE_BINARY",
+                                                 "claude.exe", "claude")
 
     def fingerprint(self) -> Mapping[str, str]:
         return {"model": self.model}
 
     def environment(self, profile: Profile) -> Mapping[str, str]:
-        profile.home.mkdir(parents=True, exist_ok=True)
-        base = {k: v for k, v in os.environ.items() if k.upper() in ALLOWED}
-        return {**base, ENV_HOME: str(profile.home)}
+        return common.environment(profile, ENV_HOME, EXTRA_ENV)
 
     def check(self, profile: Profile) -> Command:
         return Command((self.executable, "auth", "status"), self.environment(profile),
@@ -218,14 +225,15 @@ class ClaudeAdapter:
             raise RuntimeError("Нужен вход Claude по подписке; оплата по API-ключу отключена")
 
     def ask(self, entry, request: Mapping[str, object], profile: Profile) -> Command:
-        system = entry.write("invocation/system.md", str(request.get("system", "")))
+        system = entry.write("invocation/system.md", str(request.get("system") or ""))
         stdin = entry.write("invocation/input.txt", str(request["user"]))
         session = request.get("session")
         model = str(request.get("model") or self.model)
         entry.update(model=model)
+        # Без --include-partial-messages: пословные фрагменты раздували бы журнал,
+        # а разбор всё равно читает только целые сообщения и итог.
         argv = [self.executable, "-p", "--output-format", "stream-json", "--verbose",
-                "--include-partial-messages", "--model", model,
-                "--tools", "", "--strict-mcp-config", "--mcp-config", MCP_OFF,
+                "--model", model, "--tools", "", "--strict-mcp-config", "--mcp-config", MCP_OFF,
                 "--system-prompt-file", str(system)]
         # Сессию сохраняем всегда: её идентификатор уходит вызывающему, и он вправе
         # продолжить беседу. С --no-session-persistence такое продолжение невозможно.
@@ -250,33 +258,36 @@ class ClaudeAdapter:
             elif item.get("type") == "assistant":
                 streamed += [part.get("text", "") for part in item["message"].get("content", [])
                              if isinstance(part, dict) and part.get("type") == "text"]
-        if terminal and not terminal.get("is_error") and isinstance(terminal.get("result"), str):
-            usage = {**(terminal.get("usage") or {}),
-                     "total_cost_usd": terminal.get("total_cost_usd"),
-                     "modelUsage": terminal.get("modelUsage") or {}}
-            return Reply(terminal["result"], session, True, None, usage, tokens_of(usage),
-                         canonical(usage) or entry.meta.get("model"))
-        diagnostic = "cli_error" if terminal else "no_terminal_result"
-        return Reply("".join(streamed), session, False, diagnostic, {},
-                     model=entry.meta.get("model"))
+        model = entry.meta.get("model")
+        if terminal is None:
+            return Reply("".join(streamed), session, False, "no_terminal_result", {}, model=model)
+        usage = terminal_usage(terminal)
+        model = canonical(usage) or model
+        text = terminal.get("result") if isinstance(terminal.get("result"), str) else ""
+        if terminal.get("is_error"):
+            # Ошибка тоже оплачена: токены и её текст должны дойти до вызывающего.
+            return Reply("".join(streamed), session, False, "cli_error: " + (text or "без текста"),
+                         usage, tokens_of(usage), model)
+        return Reply(text, session, True, None, usage, tokens_of(usage), model)
 
     def price(self, reply: Reply) -> Cost | None:
         """CLI считает стоимость сама — свою таблицу пускаем в ход, только если не посчитала."""
         reported = (reply.usage or {}).get("total_cost_usd")
-        if isinstance(reported, int | float) and not isinstance(reported, bool):
+        if number(reported):
             return Cost(Decimal(str(reported)), "USD", "cli")
-        rates = PRICES.get(str(reply.model or ""))
-        return estimate(reply.tokens, rates) if rates and reply.tokens else None
+        return common.table_price(reply, PRICES)
 
-    def limits(self, profile: Profile, *, session: str | None = None) -> Limits | None:
+    def limits(self, profile: Profile, *, session: str | None = None,
+               model: str | None = None) -> Limits | None:
+        model = model or self.model
         try:
             payload = self.usage(profile)
         except Exception:
             # Управляющий протокол помечен как экспериментальный: его отказ — не авария.
-            return self.printed_usage(profile)
-        windows = control_windows(payload.get("rate_limits") or {})
+            return self.printed_usage(profile, model)
+        windows = control_windows(payload.get("rate_limits") or {}, model)
         if not payload.get("rate_limits_available") or not windows:
-            return self.printed_usage(profile)
+            return self.printed_usage(profile, model)
         return Limits(self.name, profile.name, windows, datetime.now(UTC), "control", True,
                       plan=payload.get("subscription_type"))
 
@@ -298,9 +309,10 @@ class ClaudeAdapter:
                 payload = response.get("response") or {}
         return payload
 
-    def printed_usage(self, profile: Profile) -> Limits | None:
+    def printed_usage(self, profile: Profile, model: str = "") -> Limits | None:
         """Запасной путь: то же, что показывает /usage человеку."""
-        windows = usage_windows(last_json(capture(self.usage_command(profile))).get("result", ""))
+        text = last_json(capture(self.usage_command(profile))).get("result", "")
+        windows = usage_windows(text, model)
         if not windows:
             return None
         # Время сброса приходит текстом без года — точную дату отсюда не соберёшь.
