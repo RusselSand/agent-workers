@@ -25,7 +25,7 @@ from .process import capture, interactive, supervise
 
 log = logging.getLogger(__name__)
 
-UNFINISHED = ("prepared", "running", "captured")
+UNFINISHED = ("prepared", "reserved", "running", "captured")
 
 
 @dataclass
@@ -88,13 +88,15 @@ class Worker:
         with registry(self.root):
             # Считаем и занимаем место разом: иначе несколько процессов, глядя на один
             # и тот же лоток, стартуют одновременно и перевалят за предел.
-            occupied = self.outbox.occupied()
+            occupied = self.outbox.occupied(besides=entry.folder.name)
             if occupied >= self.max_pending:
                 # Лучше встать, чем молча забивать диск текстами, которые не забирают.
                 broken = self.result("outbox_full", entry, None, None, None,
                                      reason=f"мест занято: {occupied}")
             else:
-                entry.mark_started()   # место занято: следующий стартующий нас увидит
+                # Бронь, а не запуск: если нас убьют до старта CLI, никто не примет
+                # пустую папку за оборванный ход — её просто выполнят заново.
+                entry.update(state="reserved")
                 broken = None
         if broken is not None:
             self.discard(entry)
@@ -114,6 +116,7 @@ class Worker:
             # иначе кривые задания и обрывы тихо забьют лоток.
             self.discard(entry)
             raise
+        entry.mark_started()   # CLI сейчас запустится: с этого места ход уже стоил денег
         entry.update(state="running", pid=os.getpid())
         try:
             outcome = supervise(command, stdout=entry.stdout, stderr=entry.stderr,

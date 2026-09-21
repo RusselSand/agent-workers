@@ -168,3 +168,13 @@ def test_outbox_commands_work_without_the_provider_cli(tmp_path, monkeypatch, ca
     assert cli.main(["collect", "--all"]) == 0
     assert cli.main(["status"]) == 2          # а вот для статуса CLI уже нужна
 
+
+def test_empty_reply_is_explained_with_the_cli_diagnostic():
+    from agent_workers.base import Reply
+
+    failed = {"reason": None, "reply": Reply("", diagnostic="cli_error: Rate limit reached")}
+    assert cli.explain(failed) == "cli_error: Rate limit reached"
+    assert cli.explain({"reason": "прошлая попытка не завершилась", "reply": None}) == (
+        "прошлая попытка не завершилась")
+    assert cli.explain({"reason": None, "reply": None}) == "ход не дал ответа"
+

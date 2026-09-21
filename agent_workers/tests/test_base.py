@@ -636,3 +636,26 @@ def test_cached_reply_is_served_even_when_login_cannot_be_checked(tmp_path, prof
     with pytest.raises(RuntimeError, match="вход не подтверждён"):
         worker.run({"user": "новый вопрос"}, ensure_login=True)     # а тут нужен
 
+
+def test_dead_reservation_is_neither_counted_nor_mistaken_for_a_turn(tmp_path, profile):
+    """Процесс убили между бронью и запуском CLI: папка пуста, ход не стоил ничего."""
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET, max_pending=1)
+    stale = Entry(tmp_path / "runs", worker.key_for({"user": "привет"}))
+    stale.update(state="reserved")            # бронь есть, владельца нет, старта не было
+
+    assert worker.outbox.occupied() == 0      # лоток не забивается чередой падений
+    result = worker.run({"user": "привет"})
+    assert result["state"] == "answered"      # выполнили, а не объявили оборванным
+
+
+def test_live_reservation_takes_a_slot(tmp_path, profile):
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET, max_pending=1)
+    owner = Entry(tmp_path / "runs", "чужая-бронь")
+    owner.claim()
+    owner.update(state="reserved")
+    try:
+        assert worker.outbox.occupied() == 1
+        assert worker.run({"user": "привет"})["state"] == "outbox_full"
+    finally:
+        owner.release()
+

@@ -25,10 +25,17 @@ class Outbox:
         return [Entry(self.root, path.name) for path in sorted(self.root.iterdir())
                 if path.is_dir() and (path / "state.json").is_file()]
 
-    def occupied(self) -> int:
-        """Занятые места: готовые результаты и уже начатые ходы."""
-        return sum(1 for entry in self.entries()
-                   if entry.meta.get("state") in DELIVERED or entry.meta.get("started"))
+    def occupied(self, *, besides: str | None = None) -> int:
+        """Занятые места: готовые результаты, начатые ходы и живые брони.
+
+        Бронь — место, взятое до запуска CLI. Если процесс убили в этот момент, бронь
+        остаётся на диске, но её никто не держит: такую не считаем, иначе череда
+        падений незаметно заполнила бы лоток. besides — своя папка: её мы сами держим,
+        и в чужих местах она не учитывается.
+        """
+        return sum(1 for entry in self.entries() if entry.folder.name != besides and (
+            entry.meta.get("state") in DELIVERED or entry.meta.get("started")
+            or (entry.meta.get("state") == "reserved" and entry.busy())))
 
     def pending(self) -> list[Entry]:
         """Готовые результаты, которых ещё не забрали. Папка живёт, пока её не заберут."""

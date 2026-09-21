@@ -169,6 +169,27 @@ class Entry:
             self.lock = handle
             return True
 
+    def busy(self) -> bool:
+        """Владеет ли папкой живой процесс. Пробуем замок и сразу отпускаем.
+
+        Без замка каталога: зовётся из-под него, а он не реентерабелен.
+        """
+        if self.lock is not None:
+            return True
+        path = self.folder / "owner.lock"
+        if not path.is_file():
+            return False
+        handle = path.open("a+b")
+        try:
+            try:
+                take_lock(handle)
+            except OSError:
+                return True
+            free_lock(handle)
+            return False
+        finally:
+            handle.close()
+
     def release(self) -> None:
         if self.lock is None:
             return

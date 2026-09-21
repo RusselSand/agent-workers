@@ -131,7 +131,7 @@ def run(worker: Worker, options) -> int:
         print("заберите результаты: python -m agent_workers pending", file=sys.stderr)
         return 6
     if result["reply"] is None or not result["reply"].text:
-        print(result["reason"] or "ход не дал ответа", file=sys.stderr)
+        print(explain(result), file=sys.stderr)
         return 4
 
     print(result["reply"].text)
@@ -141,6 +141,13 @@ def run(worker: Worker, options) -> int:
     if result["reason"]:
         print(result["reason"], file=sys.stderr)
     return 0 if state in ("answered", "resumed") else 4
+
+
+def explain(result) -> str:
+    """Почему ответа нет: причина воркера и диагностика CLI, если она есть."""
+    reply = result["reply"]
+    parts = [result["reason"], reply.diagnostic if reply else None]
+    return "; ".join(part for part in parts if part) or "ход не дал ответа"
 
 
 def report(result) -> None:
