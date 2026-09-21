@@ -224,8 +224,10 @@ class ClaudeAdapter:
                 "--include-partial-messages", "--model", model,
                 "--tools", "", "--strict-mcp-config", "--mcp-config", MCP_OFF,
                 "--system-prompt-file", str(system)]
-        # Без продолжения сессии не храним её вовсе: меньше следов чужой работы на диске.
-        argv += ["--resume", str(session)] if session else ["--no-session-persistence"]
+        # Сессию сохраняем всегда: её идентификатор уходит вызывающему, и он вправе
+        # продолжить беседу. С --no-session-persistence такое продолжение невозможно.
+        if session:
+            argv += ["--resume", str(session)]
         return Command(tuple(argv), self.environment(profile), entry.folder, stdin)
 
     def reply(self, entry, profile: Profile) -> Reply:

@@ -428,3 +428,29 @@ def test_answer_of_another_model_is_not_served_as_ours(tmp_path, profile):
     second.adapter.model = "вторая-модель"
     assert second.run({"user": "привет"})["state"] == "answered"   # выполнили заново
 
+
+def test_started_turn_takes_a_slot_in_the_outbox(tmp_path, profile):
+    """Иначе несколько процессов, глядя на один лоток, стартуют разом и перевалят предел."""
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET, max_pending=1)
+    started = Entry(tmp_path / "runs", "чужой-ход")
+    started.claim()
+    started.mark_started()          # ход идёт, результата ещё нет
+    started.update(state="running")
+    started.release()
+
+    assert worker.occupied() == 1
+    assert worker.pending() == []   # в лотке пусто, но место занято
+    assert worker.run({"user": "привет"})["state"] == "outbox_full"
+
+
+def test_retry_forgets_the_numbers_of_the_previous_attempt(tmp_path, profile):
+    """Расход и сессия относились к прошлой попытке, новый ход отчитается своими."""
+    entry = Entry(tmp_path, "ход")
+    entry.claim()
+    entry.update(state="answered", started=True, usage={"input_tokens": 13773},
+                 session_id="сессия-1", returncode=0)
+    entry.restart()
+    assert "usage" not in entry.meta and entry.meta["session_id"] is None
+    assert entry.meta["attempt"] == 1 and entry.attempted is False
+    entry.release()
+

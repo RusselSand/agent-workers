@@ -173,8 +173,9 @@ class Entry:
             if path.name in keep or path.name.startswith(("attempt-", "state.")):
                 continue
             path.replace(archive / path.name)
-        self._write({**self.meta, "state": "prepared", "started": False,
-                     "pid": None, "attempt": attempt})
+        # Всё, что относилось к прошлой попытке — расход, сессия, код возврата, —
+        # уезжает вместе с ней: иначе новый ход отчитается чужими цифрами.
+        self._write({**EMPTY, "attempt": attempt})
         return attempt
 
     def drop(self) -> None:

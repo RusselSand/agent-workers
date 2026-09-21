@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .contract import Adapter, Profile
-from .entry import Busy, Entry, NotRemoved, digest, folder_for
+from .entry import Busy, Entry, NotRemoved, digest, folder_for, registry
 from .guard import Guard, LimitPolicy
 from .process import capture, interactive, supervise
 
@@ -76,12 +76,20 @@ class Worker:
             # Маркер стоит, а владельца нет: это итог прошлой попытки, а не работа.
             return self.taken(entry)
 
-        waiting = len(self.pending())
-        if waiting >= self.max_pending:
-            # Лучше встать, чем молча забивать диск текстами, которые никто не забирает.
+        with registry(self.root):
+            # Считаем и занимаем место разом: иначе несколько процессов, глядя на один
+            # и тот же лоток, стартуют одновременно и перевалят за предел.
+            occupied = self.occupied()
+            if occupied >= self.max_pending:
+                # Лучше встать, чем молча забивать диск текстами, которые не забирают.
+                broken = self.result("outbox_full", entry, None, None, None,
+                                     reason=f"мест занято: {occupied}")
+            else:
+                entry.mark_started()   # место занято: следующий стартующий нас увидит
+                broken = None
+        if broken is not None:
             self.discard(entry)
-            return self.result("outbox_full", entry, None, None, None,
-                               reason=f"не забрано результатов: {waiting}")
+            return broken
 
         before = self.guard.measure("before")
         reason = self.guard.blocked(before)
@@ -90,7 +98,6 @@ class Worker:
             return self.result("limit_reached", entry, None, before, None, reason=reason)
 
         command = self.adapter.ask(entry, request, self.profile)
-        entry.mark_started()
         entry.update(state="running", pid=os.getpid())
         outcome = supervise(command, stdout=entry.stdout, stderr=entry.stderr,
                             pulse=pulse, stop=stop, timeout=self.timeout)
@@ -111,13 +118,20 @@ class Worker:
         model = request.get("model") or getattr(self.adapter, "model", "")
         return digest({"adapter": self.adapter.name, "request": {**request, "model": model}})
 
-    def pending(self) -> list[Entry]:
-        """Готовые результаты, которых ещё не забрали. Папка живёт, пока её не заберут."""
+    def entries(self) -> list[Entry]:
         if not self.root.is_dir():
             return []
-        entries = (Entry(self.root, path.name) for path in sorted(self.root.iterdir())
-                   if path.is_dir() and (path / "state.json").is_file())
-        return [entry for entry in entries if entry.meta.get("state") in DELIVERED]
+        return [Entry(self.root, path.name) for path in sorted(self.root.iterdir())
+                if path.is_dir() and (path / "state.json").is_file()]
+
+    def occupied(self) -> int:
+        """Занятые места: готовые результаты и уже начатые ходы."""
+        return sum(1 for entry in self.entries()
+                   if entry.meta.get("state") in DELIVERED or entry.meta.get("started"))
+
+    def pending(self) -> list[Entry]:
+        """Готовые результаты, которых ещё не забрали. Папка живёт, пока её не заберут."""
+        return [entry for entry in self.entries() if entry.meta.get("state") in DELIVERED]
 
     def collect(self, entry: Entry | str) -> None:
         """Забрали — папку сносим. Сколько хранить, решает тот, кто забирает.

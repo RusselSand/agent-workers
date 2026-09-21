@@ -86,3 +86,18 @@ def test_multiline_auth_status_is_accepted(sample):
 def test_login_without_subscription_is_refused():
     with pytest.raises(RuntimeError):
         adapter().verify('{"loggedIn": true, "authMethod": "apiKey"}')
+
+
+def test_new_session_is_saved_so_it_can_be_continued(profile, tmp_path):
+    """Идентификатор сессии уходит наружу — значит её обязаны сохранить."""
+    entry = Entry(tmp_path, "run")
+    command = adapter().ask(entry, {"user": "привет"}, profile)
+    assert "--no-session-persistence" not in command.argv
+    assert "--resume" not in command.argv
+
+
+def test_continuation_asks_for_the_same_session(profile, tmp_path):
+    entry = Entry(tmp_path, "run")
+    command = adapter().ask(entry, {"user": "дальше", "session": "сессия-1"}, profile)
+    assert command.argv[command.argv.index("--resume") + 1] == "сессия-1"
+
