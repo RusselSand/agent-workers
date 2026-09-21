@@ -119,3 +119,24 @@ def test_cached_part_is_not_charged_twice():
                            "output_tokens": 5})
     assert (tokens.input, tokens.cached_input) == (892, 13056)
     assert tokens.total == 13953   # весь запрос плюс ответ, без двойного счёта
+
+
+def test_snapshot_keeps_the_time_it_was_actually_taken(sample, profile):
+    """Вчерашний снимок, помеченный сегодняшним временем, разрешил бы ход по старым цифрам."""
+    session = resumed_profile(sample, profile)
+    limits = adapter().snapshot(profile, session=session)
+    assert limits.measured_at == datetime.fromisoformat("2026-09-21T13:31:12+00:00")
+    assert limits.measured_at != datetime.now(UTC)
+
+
+def test_stale_snapshot_is_treated_as_unknown(sample, profile):
+    from agent_workers.base import Guard, LimitPolicy
+
+    folder = profile.home / "sessions" / "2026" / "09" / "21"
+    folder.mkdir(parents=True)
+    (folder / "rollout-2026-09-21T11-21-25-old.jsonl").write_text(
+        sample("codex-rollout.jsonl"), encoding="utf-8")
+    limits = adapter().snapshot(profile)          # без сессии — значит неточный
+    guard = Guard(adapter(), profile, LimitPolicy(on_unknown="refuse"))
+    assert limits.exact is False
+    assert guard.blocked(limits) == "Лимит неизвестен"

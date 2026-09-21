@@ -83,3 +83,36 @@ def test_unnamed_connection_is_reported_not_guessed(capsys, monkeypatch):
 def test_unknown_provider_is_rejected_by_the_parser():
     with pytest.raises(SystemExit):
         cli.main(["run", "--provider", "gemini", "привет"])
+
+
+def test_retry_is_reachable_from_the_command_line():
+    options = cli.parser().parse_args(["run", "--retry", "привет"])
+    assert options.retry is True and options.prompt == "привет"
+
+
+def ready_entry(tmp_path, text="ответ"):
+    """Готовый результат в лотке, как его оставил бы завершившийся ход."""
+    from agent_workers.base import Entry
+    entry = Entry(tmp_path / "учётка" / "runs", "ключ-хода")
+    entry.write("stdout.jsonl", text)
+    entry.update(state="answered", model="claude-opus-5")
+    return entry
+
+
+def test_pending_lists_what_nobody_collected(tmp_path, capsys):
+    ready_entry(tmp_path)
+    assert cli.main(["pending"]) == 0
+    printed = capsys.readouterr().out
+    assert "ключ-хода" in printed and "answered" in printed
+
+
+def test_collect_removes_the_folder(tmp_path, capsys):
+    entry = ready_entry(tmp_path)
+    assert cli.main(["collect", "--all"]) == 0
+    assert not entry.folder.exists()
+    assert "забрано: 1" in capsys.readouterr().out
+
+
+def test_empty_outbox_says_so(capsys):
+    assert cli.main(["pending"]) == 0
+    assert "лоток пуст" in capsys.readouterr().out

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 
 
@@ -66,3 +67,27 @@ class Entry:
             return False
         self.update(started=True)
         return True
+
+    def release_start(self) -> None:
+        """Ход так и не начался: снимаем маркер, папка снова свободна."""
+        (self.folder / "started").unlink(missing_ok=True)
+        self.update(started=False, state="prepared")
+
+    def restart(self) -> int:
+        """Повтор: прежнюю попытку отодвигаем целиком, чтобы разбор не смешал две.
+
+        Переносим всё, кроме состояния: что именно лежит в папке, знает провайдер.
+        """
+        attempt = int(self.meta.get("attempt", 0)) + 1
+        archive = self.folder / f"attempt-{attempt}"
+        archive.mkdir(exist_ok=True)
+        for path in self.folder.iterdir():
+            if path.name != self.state_path.name and not path.name.startswith("attempt-"):
+                path.replace(archive / path.name)
+        self._write({**self.meta, "state": "prepared", "started": False,
+                     "pid": None, "attempt": attempt})
+        return attempt
+
+    def drop(self) -> None:
+        """Забрали — папка не нужна: сносим целиком, вместе с отложенными попытками."""
+        shutil.rmtree(self.folder, ignore_errors=True)

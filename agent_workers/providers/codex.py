@@ -102,19 +102,28 @@ def rollouts(home: Path):
     return sorted((home / "sessions").rglob("rollout-*.jsonl"), reverse=True)
 
 
-def rate_limits(text: str) -> dict | None:
-    """Последний непустой снимок лимитов в роллауте."""
-    found = None
+def snapshot_of(text: str) -> tuple[dict | None, datetime | None]:
+    """Последний непустой снимок лимитов и время, которым его пометил сам Codex.
+
+    Время обязательно: снимок может быть вчерашним, и выдавать его за сейчас нельзя —
+    на возрасте замера держится решение, начинать ли ход.
+    """
+    found, when = None, None
     for line in text.splitlines():
         if '"rate_limits"' not in line:
             continue
         try:
-            payload = json.loads(line).get("payload") or {}
+            record = json.loads(line)
         except ValueError:
             continue
+        payload = record.get("payload") or {}
         if payload.get("type") == "token_count" and payload.get("rate_limits"):
-            found = payload["rate_limits"]
-    return found
+            found, when = payload["rate_limits"], moment(record.get("timestamp"))
+    return found, when
+
+
+def rate_limits(text: str) -> dict | None:
+    return snapshot_of(text)[0]
 
 
 def count(value) -> int:
@@ -288,11 +297,13 @@ class CodexAdapter:
         path = self.rollout(profile, session=session)
         if path is None:
             return None
-        raw = rate_limits(path.read_text(encoding="utf-8", errors="ignore"))
+        raw, when = snapshot_of(path.read_text(encoding="utf-8", errors="ignore"))
         windows = rollout_windows(raw) if raw else ()
         if not windows:
             return None
-        return Limits(self.name, profile.name, windows, datetime.now(UTC), "rollout",
+        # Ни своего времени, ни отметки в записи — берём время файла, но не «сейчас».
+        measured = when or datetime.fromtimestamp(path.stat().st_mtime, UTC)
+        return Limits(self.name, profile.name, windows, measured, "rollout",
                       session is not None, plan=raw.get("plan_type"), credits=credits_of(raw))
 
     def rollout(self, profile: Profile, *, session: str | None = None) -> Path | None:

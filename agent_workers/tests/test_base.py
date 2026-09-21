@@ -96,14 +96,66 @@ def test_worker_refuses_before_spending_anything(tmp_path, profile):
     assert result["after"] is None
 
 
-def test_second_pass_over_the_same_request_does_not_run_again(tmp_path, profile):
-    adapter = FakeAdapter(tmp_path, percent=[1.0, 2.0, 3.0, 4.0])
+def test_ready_answer_is_served_for_free(tmp_path, profile):
+    """Готовый ответ уже оплачен: ни замера, ни сборки запроса, ни запуска."""
+    adapter = FakeAdapter(tmp_path, percent=[1.0, 2.0])
     worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
     worker.run({"user": "привет"})
+    reads, asked = adapter.reads, len(adapter.asked)
+
     again = worker.run({"user": "привет"})
-    assert again["state"] == "resumed"
-    assert len(adapter.asked) == 2        # команду собрали, но процесс не запускали
-    assert again["reply"].text == "привет"
+    assert again["state"] == "resumed" and again["reply"].text == "привет"
+    assert (adapter.reads, len(adapter.asked)) == (reads, asked)
+    assert again["before"] is None and again["spent"] == {}
+
+
+def test_exhausted_window_does_not_hide_a_ready_answer(tmp_path, profile):
+    """Иначе выбранный лимит стирал бы уже полученный ответ отказом."""
+    adapter = FakeAdapter(tmp_path, percent=[1.0, 2.0])
+    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
+    worker.run({"user": "привет"})
+    entry = Worker(adapter, profile, tmp_path / "runs", QUIET).run({"user": "привет"})["entry"]
+
+    strict = Worker(FakeAdapter(tmp_path, percent=[99.0]), profile, tmp_path / "runs", QUIET)
+    served = strict.run({"user": "привет"})
+    assert served["state"] == "resumed"
+    assert entry.meta["state"] == "answered"     # отказ не затирает состояние папки
+
+
+def test_dead_attempt_is_not_reported_as_running(tmp_path, profile):
+    """След оборванной попытки не должен выдавать себя за идущую работу."""
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
+    entry = Entry(tmp_path / "runs", digest({"adapter": "fake", "request": {"user": "привет"}}))
+    entry.reserve_start()
+    entry.update(state="running", pid=999_999_999, epoch=None)
+
+    stalled = worker.run({"user": "привет"})
+    assert stalled["state"] == "incomplete"
+    assert "retry" in stalled["reason"]
+
+
+def test_retry_starts_a_clean_attempt_and_keeps_the_old_one(tmp_path, profile):
+    adapter = FakeAdapter(tmp_path)
+    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
+    entry = Entry(tmp_path / "runs", digest({"adapter": "fake", "request": {"user": "привет"}}))
+    entry.reserve_start()
+    entry.write("stdout.jsonl", "обрывок прошлой попытки")
+    entry.update(state="incomplete")
+
+    again = worker.run({"user": "привет"}, retry=True)
+    assert again["state"] == "answered" and again["reply"].text == "привет"
+    kept = (again["entry"].folder / "attempt-1" / "stdout.jsonl").read_text(encoding="utf-8")
+    assert kept == "обрывок прошлой попытки"
+
+
+def test_live_owner_is_left_alone(tmp_path, profile):
+    import os
+
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
+    entry = Entry(tmp_path / "runs", digest({"adapter": "fake", "request": {"user": "привет"}}))
+    entry.reserve_start()
+    entry.update(state="running", pid=os.getpid(), epoch=None)
+    assert worker.run({"user": "привет"})["state"] == "in_progress"
 
 
 def test_measurement_after_the_turn_waits_for_accounting(tmp_path, profile):
@@ -152,3 +204,43 @@ def test_failed_measurement_does_not_break_the_turn(tmp_path, profile):
 
     result = Worker(Broken(tmp_path), profile, tmp_path / "runs", QUIET).run({"user": "привет"})
     assert result["state"] == "answered" and result["before"] is None
+
+
+def test_result_waits_in_the_outbox_until_it_is_collected(tmp_path, profile):
+    """Папка живёт не по таймеру, а пока результат не заберут."""
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
+    result = worker.run({"user": "привет"})
+
+    waiting = worker.pending()
+    assert [entry.folder for entry in waiting] == [result["entry"].folder]
+
+    worker.collect(waiting[0])
+    assert worker.pending() == []
+    assert not result["entry"].folder.exists()
+
+
+def test_collected_answer_is_no_longer_served_for_free(tmp_path, profile):
+    adapter = FakeAdapter(tmp_path, percent=[1.0, 2.0, 3.0, 4.0])
+    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
+    worker.collect(worker.run({"user": "привет"})["entry"])
+    assert worker.run({"user": "привет"})["state"] == "answered"   # выполнили заново, честно
+
+
+def test_full_outbox_stops_new_turns_instead_of_filling_the_disk(tmp_path, profile):
+    adapter = FakeAdapter(tmp_path, percent=[1.0, 2.0])
+    worker = Worker(adapter, profile, tmp_path / "runs", QUIET, max_pending=1)
+    worker.run({"user": "первый"})
+    reads, asked = adapter.reads, len(adapter.asked)
+
+    stopped = worker.run({"user": "второй"})
+    assert stopped["state"] == "outbox_full"
+    assert (adapter.reads, len(adapter.asked)) == (reads, asked)   # ничего не потрачено
+    assert len(worker.pending()) == 1                              # мусора не прибавилось
+
+
+def test_refused_turn_leaves_no_folder_behind(tmp_path, profile):
+    worker = Worker(FakeAdapter(tmp_path, percent=[99.0]), profile, tmp_path / "runs", QUIET)
+    refused = worker.run({"user": "привет"})
+    assert refused["state"] == "limit_reached"
+    assert not refused["entry"].folder.exists()
+    assert worker.pending() == []

@@ -31,7 +31,6 @@ class Guard:
     adapter: Adapter
     profile: Profile
     policy: LimitPolicy = field(default_factory=LimitPolicy)
-    sink: object = None       # вызываемое: получает каждый замер, если проекту это нужно
     sleep: object = time.sleep
 
     def measure(self, phase: str, *, session: str | None = None) -> Limits | None:
@@ -48,8 +47,6 @@ class Guard:
                 # Замер — не цель работы: его отказ не должен ронять сам ход.
                 log.warning("Замер лимита (%s) не удался: %s", phase, type(exc).__name__)
                 break
-        if latest is not None and callable(self.sink):
-            self.sink({"phase": phase, "limits": latest})
         return latest
 
     def blocked(self, limits: Limits | None) -> str | None:
