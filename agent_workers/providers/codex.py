@@ -238,11 +238,17 @@ class CodexAdapter:
             elif kind == "item.completed" and item.get("item", {}).get("type") == "agent_message":
                 message = item["item"].get("text", "") or message
         text = entry.read("summary.txt") or message
-        # turn.completed в продолженной сессии отдаёт итог всей беседы, а не этот ход;
-        # расход именно хода лежит в роллауте, в last_token_usage.
-        usage = self.turn_usage(profile, session) or usage
-        return Reply(text, session, complete and bool(text),
-                     None if complete else "no_terminal_event", usage,
+        done = complete and bool(text)
+        # Роллаут — живой хвост сессии: продолжат беседу другим ходом, и last_token_usage
+        # станет чужим. Поэтому расход своего хода записываем сразу и потом берём его.
+        saved = entry.meta.get("usage")
+        if isinstance(saved, dict) and saved:
+            usage = saved
+        else:
+            usage = self.turn_usage(profile, session) or usage
+            if done and usage:
+                entry.update(usage=usage)
+        return Reply(text, session, done, None if complete else "no_terminal_event", usage,
                      tokens_of(usage), entry.meta.get("model") or self.model)
 
     def turn_usage(self, profile: Profile, session: str | None) -> dict | None:

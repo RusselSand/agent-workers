@@ -53,7 +53,7 @@ class Worker:
 
     def run(self, request: Mapping[str, object], *, key: str | None = None,
             pulse=None, stop=None, retry: bool = False) -> dict:
-        entry = Entry(self.root, key or digest({"adapter": self.adapter.name, "request": request}))
+        entry = Entry(self.root, key or self.key_for(request))
         if not entry.claim():
             # Папкой владеет живой процесс. Ни повторять, ни двигать его журналы нельзя:
             # иначе второй вызов оплатит ту же работу, а состояние напишут оба сразу.
@@ -101,6 +101,15 @@ class Worker:
         entry.update(state=state, session_id=reply.session_id, diagnostic=reply.diagnostic)
         after = self.guard.measure("after", session=reply.session_id)
         return self.result(state, entry, reply, before, after)
+
+    def key_for(self, request: Mapping[str, object]) -> str:
+        """Ключ считаем от запроса вместе с моделью, которой он достанется.
+
+        Иначе смена AGENT_MODEL отдала бы старый ответ из лотка как свой: запрос тот же,
+        а отвечала другая модель.
+        """
+        model = request.get("model") or getattr(self.adapter, "model", "")
+        return digest({"adapter": self.adapter.name, "request": {**request, "model": model}})
 
     def pending(self) -> list[Entry]:
         """Готовые результаты, которых ещё не забрали. Папка живёт, пока её не заберут."""

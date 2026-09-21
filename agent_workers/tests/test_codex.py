@@ -140,3 +140,23 @@ def test_stale_snapshot_is_treated_as_unknown(sample, profile):
     guard = Guard(adapter(), profile, LimitPolicy(on_unknown="refuse"))
     assert limits.exact is False
     assert guard.blocked(limits) == "Лимит неизвестен"
+
+
+def test_turn_usage_is_saved_before_the_session_moves_on(sample, profile, tmp_path):
+    """Беседу продолжат другим ходом, и last_token_usage в роллауте станет чужим."""
+    session = resumed_profile(sample, profile)
+    entry = Entry(tmp_path, "run")
+    entry.write("stdout.jsonl", sample("codex-exec-resumed.jsonl"))
+    first = adapter().reply(entry, profile)
+    assert first.tokens.input == 13773
+    assert entry.meta["usage"]["input_tokens"] == 13773     # запомнили сразу
+
+    rollout = next((profile.home / "sessions").rglob(f"*{session}.jsonl"))
+    grown = json.loads(rollout.read_text(encoding="utf-8").splitlines()[-1])
+    grown["payload"]["info"]["last_token_usage"] = {"input_tokens": 99999, "output_tokens": 7}
+    with rollout.open("a", encoding="utf-8") as tail:
+        tail.write(json.dumps(grown, ensure_ascii=False) + chr(10))
+
+    again = adapter().reply(entry, profile)
+    assert again.tokens.input == 13773                      # свой расход, а не чужого хода
+

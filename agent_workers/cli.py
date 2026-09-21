@@ -10,7 +10,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from .base.entry import Busy, Entry, NotRemoved, digest
+from .base.entry import Busy, Entry, NotRemoved
 from .base.worker import Worker
 from .build import ADAPTERS, build
 from .config import Settings
@@ -94,12 +94,20 @@ def run(worker: Worker, options) -> int:
         request["system"] = Path(options.system_file).read_text(encoding="utf-8")
 
     if options.dry_run:
-        entry = Entry(worker.root, digest({"adapter": worker.adapter.name, "request": request}))
-        command = worker.adapter.ask(entry, request, worker.profile)
-        print(f"каталог хода: {entry.folder}")
-        print("команда:", " ".join(command.argv))
-        print(f"stdin: {command.stdin}")
-        print("\nНичего не запущено и не потрачено.")
+        entry = Entry(worker.root, worker.key_for(request))
+        if not entry.claim():
+            # Тот же запрос выполняется прямо сейчас: его файлы трогать нельзя.
+            print("этот ход уже идёт в другом процессе", file=sys.stderr)
+            return 5
+        try:
+            command = worker.adapter.ask(entry, request, worker.profile)
+            print(f"каталог хода: {entry.folder}")
+            print("команда:", " ".join(command.argv))
+            print(f"stdin: {command.stdin}")
+        finally:
+            entry.release()
+        print()
+        print("Ничего не запущено и не потрачено.")
         return 0
 
     try:

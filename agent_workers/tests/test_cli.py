@@ -137,3 +137,22 @@ def test_collect_all_skips_what_is_busy(tmp_path, capsys):
     printed = capsys.readouterr().out
     assert "забрано: 1" in printed and "занято: 1" in printed
     assert busy.folder.exists()
+
+
+def test_dry_run_does_not_touch_a_running_entry(tmp_path, capsys):
+    """Файлы задания у идущего хода читает живая CLI — переписывать их нельзя."""
+    from agent_workers import build
+    from agent_workers.base import Entry
+    from agent_workers.config import Settings
+
+    worker = build(Settings.load(tmp_path))
+    owner = Entry(worker.root, worker.key_for({"user": "привет", "model": worker.adapter.model}))
+    owner.claim()
+    owner.write("invocation/input.txt", "задание идущего хода")
+    try:
+        assert cli.main(["run", "--dry-run", "привет"]) == 5
+    finally:
+        owner.release()
+    assert owner.read("invocation/input.txt") == "задание идущего хода"
+    assert "уже идёт" in capsys.readouterr().err
+

@@ -154,7 +154,7 @@ def test_exhausted_window_does_not_hide_a_ready_answer(tmp_path, profile):
 def test_dead_attempt_is_not_reported_as_running(tmp_path, profile):
     """След оборванной попытки не должен выдавать себя за идущую работу."""
     worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
-    entry = Entry(tmp_path / "runs", digest({"adapter": "fake", "request": {"user": "привет"}}))
+    entry = Entry(tmp_path / "runs", worker.key_for({"user": "привет"}))
     entry.mark_started()
     entry.update(state="running", pid=999_999_999)   # владельца нет: замок никто не держит
 
@@ -165,7 +165,7 @@ def test_dead_attempt_is_not_reported_as_running(tmp_path, profile):
 
 def test_retry_starts_a_clean_attempt_and_keeps_the_old_one(tmp_path, profile):
     worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
-    entry = Entry(tmp_path / "runs", digest({"adapter": "fake", "request": {"user": "привет"}}))
+    entry = Entry(tmp_path / "runs", worker.key_for({"user": "привет"}))
     entry.mark_started()
     entry.write("stdout.jsonl", "обрывок прошлой попытки")
     entry.update(state="incomplete")
@@ -178,7 +178,7 @@ def test_retry_starts_a_clean_attempt_and_keeps_the_old_one(tmp_path, profile):
 
 def test_live_owner_is_left_alone(tmp_path, profile):
     worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
-    owner = Entry(tmp_path / "runs", digest({"adapter": "fake", "request": {"user": "привет"}}))
+    owner = Entry(tmp_path / "runs", worker.key_for({"user": "привет"}))
     assert owner.claim() is True
     try:
         assert worker.run({"user": "привет"})["state"] == "in_progress"
@@ -190,7 +190,7 @@ def test_retry_does_not_touch_a_live_attempt(tmp_path, profile):
     """Иначе журналы работающего хода уехали бы в архив, а вызов оплатил бы его заново."""
     adapter = FakeAdapter(tmp_path)
     worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
-    owner = Entry(tmp_path / "runs", digest({"adapter": "fake", "request": {"user": "привет"}}))
+    owner = Entry(tmp_path / "runs", worker.key_for({"user": "привет"}))
     owner.claim()
     owner.mark_started()
     owner.write("stdout.jsonl", "идущая работа")
@@ -401,4 +401,30 @@ def test_failed_removal_is_reported_not_swallowed(tmp_path, profile):
     finally:
         entry_module.shutil.rmtree = original
     assert entry.folder.exists()
+
+
+def test_key_depends_on_the_model_that_will_answer(tmp_path, profile):
+    """Иначе смена модели отдала бы старый ответ из лотка как свой."""
+    class Named(FakeAdapter):
+        model = "первая-модель"
+
+    worker = Worker(Named(tmp_path), profile, tmp_path / "runs", QUIET)
+    other = Worker(Named(tmp_path), profile, tmp_path / "runs", QUIET)
+    other.adapter.model = "вторая-модель"
+
+    assert worker.key_for({"user": "привет"}) != other.key_for({"user": "привет"})
+    assert worker.key_for({"user": "привет"}) == worker.key_for(
+        {"user": "привет", "model": "первая-модель"})
+
+
+def test_answer_of_another_model_is_not_served_as_ours(tmp_path, profile):
+    class Named(FakeAdapter):
+        model = "первая-модель"
+
+    first = Worker(Named(tmp_path), profile, tmp_path / "runs", QUIET)
+    first.run({"user": "привет"})
+
+    second = Worker(Named(tmp_path), profile, tmp_path / "runs", QUIET)
+    second.adapter.model = "вторая-модель"
+    assert second.run({"user": "привет"})["state"] == "answered"   # выполнили заново
 
