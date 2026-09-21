@@ -1,0 +1,23 @@
+{
+ "subscription_type": "max",
+ "rate_limits_available": true,
+ "rate_limits": {
+  "five_hour": {
+   "utilization": 10,
+   "resets_at": "2026-09-21T13:10:00.275565+00:00"
+  },
+  "seven_day": {
+   "utilization": 23,
+   "resets_at": "2026-09-26T17:00:00.275587+00:00"
+  },
+  "seven_day_opus": null,
+  "seven_day_sonnet": null,
+  "model_scoped": [
+   {
+    "display_name": "Fable",
+    "utilization": 23,
+    "resets_at": "2026-09-26T17:00:00.275759+00:00"
+   }
+  ]
+ }
+}

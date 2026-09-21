@@ -1,0 +1,5 @@
+{"ordinaryUsageAllowed": false,
+ "rateLimits": {"limitId": "codex", "limitName": null, "primary": {"usedPercent": 100, "windowDurationMins": 10080, "resetsAt": 1790258347}, "secondary": null, "credits": {"hasCredits": true, "unlimited": false, "balance": "184.5226000000"}, "planType": "prolite", "rateLimitReachedType": "rate_limit_reached"},
+ "rateLimitsByLimitId": {
+   "base_model_inference": {"limitId": "base_model_inference", "limitName": "gpt-reserve", "normalModelSlug": "gpt-5.6-luna", "primary": {"usedPercent": 0, "windowDurationMins": 10080, "resetsAt": 1790588781}, "secondary": null, "credits": null, "planType": "prolite"},
+   "codex": {"limitId": "codex", "limitName": null, "primary": {"usedPercent": 100, "windowDurationMins": 10080, "resetsAt": 1790258347}, "secondary": null, "credits": {"hasCredits": true, "unlimited": false, "balance": "184.5226000000"}, "planType": "prolite"}}}

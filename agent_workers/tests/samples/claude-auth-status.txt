@@ -1,0 +1,8 @@
+Installing Claude Code native build...
+{
+  "loggedIn": true,
+  "authMethod": "claude.ai",
+  "apiProvider": "firstParty",
+  "configDirectory": "C:\\Users\\worker\\.claude",
+  "subscriptionType": "max"
+}
