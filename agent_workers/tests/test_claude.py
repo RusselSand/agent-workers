@@ -133,3 +133,8 @@ def test_partial_message_stream_is_not_requested(profile, tmp_path):
     argv = adapter().ask(entry, {"user": "привет"}, profile).argv
     assert "--include-partial-messages" not in argv
 
+
+def test_fallback_usage_probe_does_not_leave_sessions_behind(profile):
+    argv = adapter().usage_command(profile).argv
+    assert "--no-session-persistence" in argv and "/usage" in argv
+

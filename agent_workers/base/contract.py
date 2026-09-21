@@ -21,6 +21,11 @@ class Profile:
     name: str
     home: Path
 
+    def __post_init__(self) -> None:
+        # Вход и зонды идут с cwd=home, сам ход — из папки хода: относительный путь
+        # там означал бы разные каталоги, и свежий вход выглядел бы как его отсутствие.
+        object.__setattr__(self, "home", Path(self.home).resolve())
+
 
 @dataclass(frozen=True)
 class Command:

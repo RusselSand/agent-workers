@@ -319,5 +319,8 @@ class ClaudeAdapter:
         return Limits(self.name, profile.name, windows, datetime.now(UTC), "usage", True)
 
     def usage_command(self, profile: Profile) -> Command:
-        return Command((self.executable, "-p", "--output-format", "json", "/usage"),
+        # Без сохранения сессии: у зонда нет беседы, которую кто-то продолжит,
+        # а замеров по два-три на ход — каталог учётной записи рос бы впустую.
+        return Command((self.executable, "-p", "--output-format", "json",
+                        "--no-session-persistence", "/usage"),
                        self.environment(profile), profile.home, timeout=120)

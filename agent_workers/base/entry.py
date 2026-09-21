@@ -92,6 +92,28 @@ def registry(root: Path):
         handle.close()
 
 
+def hold(path: Path):
+    """Неблокирующий замок на произвольный файл: дескриптор или None, если занят."""
+    private_dir(path.parent)
+    handle = path.open("a+b")
+    make_private(path, PRIVATE_FILE)
+    try:
+        take_lock(handle)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
+def let_go(handle) -> None:
+    if handle is None:
+        return
+    try:
+        free_lock(handle)
+    finally:
+        handle.close()
+
+
 class Entry:
     def __init__(self, root: Path, key: str) -> None:
         self.folder = folder_for(root, key)

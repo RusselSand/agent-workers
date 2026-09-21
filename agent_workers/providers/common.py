@@ -32,7 +32,9 @@ def find_executable(explicit: str | None, variable: str, *names: str) -> str:
         found = found or shutil.which(name)
     if not found or not Path(found).is_file():
         raise RuntimeError(f"CLI не найдена: {' / '.join(names)}")
-    return found
+    # Абсолютный путь: подпроцессы стартуют из разных каталогов, и относительный
+    # путь вроде ./bin/claude там уже никуда не ведёт.
+    return str(Path(found).resolve())
 
 
 def environment(profile: Profile, home_variable: str, extra: set[str] = frozenset()) -> dict:

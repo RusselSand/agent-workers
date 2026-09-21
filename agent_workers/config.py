@@ -86,7 +86,7 @@ class Settings:
     def home(self) -> Path:
         """Каталог учётной записи. Вне репозитория: в нём лежат токены входа."""
         named = self.get("AGENT_HOME")
-        return Path(named) if named else Path.home() / ".agent-worker" / self.provider
+        return (Path(named) if named else Path.home() / ".agent-worker" / self.provider).resolve()
 
     @property
     def model(self) -> str:
@@ -95,7 +95,7 @@ class Settings:
     @property
     def runs(self) -> Path:
         named = self.get("AGENT_RUNS")
-        return Path(named) if named else self.home / "runs"
+        return (Path(named) if named else self.home / "runs").resolve()
 
     @property
     def max_pending(self) -> int:

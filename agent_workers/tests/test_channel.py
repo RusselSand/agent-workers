@@ -1,6 +1,7 @@
 """Диалог по stdio — механика базы, поэтому проверяется на обычном python-процессе."""
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -48,3 +49,17 @@ def test_process_is_closed_on_leaving_the_block(tmp_path):
     with Channel(command(tmp_path, ECHO)) as channel:
         process = channel.process
     assert process.poll() is not None
+
+
+def test_deadline_holds_even_under_a_stream_of_unrelated_events(tmp_path):
+    """Болтливый процесс не должен держать зонд вечно."""
+    import time
+
+    script = Path(__file__).with_name("chatty_child.py")
+    command = Command((sys.executable, str(script)), dict(os.environ), tmp_path, timeout=5)
+    started = time.monotonic()
+    with Channel(command) as channel:
+        with pytest.raises(ChannelError):
+            channel.wait(lambda item: item.get("id") == 1, timeout=0.5)
+    assert time.monotonic() - started < 3
+

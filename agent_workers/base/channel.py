@@ -48,6 +48,9 @@ class Channel:
     def wait(self, match, *, timeout: float | None = None) -> dict:
         deadline = time.monotonic() + (timeout or self.timeout)
         while True:
+            # Болтливый процесс шлёт уведомления без конца: срок истекает и при них.
+            if time.monotonic() >= deadline:
+                raise ChannelError("Подпроцесс не ответил вовремя")
             try:
                 event = self.events.get(timeout=max(0.01, deadline - time.monotonic()))
             except Empty:

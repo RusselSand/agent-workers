@@ -659,3 +659,74 @@ def test_live_reservation_takes_a_slot(tmp_path, profile):
     finally:
         owner.release()
 
+
+def test_continuations_of_one_conversation_take_turns(tmp_path, profile):
+    """Два продолжения одной беседы с разными вопросами не идут одновременно."""
+    from agent_workers.base.entry import hold, let_go
+
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
+    session = "беседа-1"
+    busy = hold(tmp_path / "runs" / ".sessions" / f"{digest(session)}.lock")
+    try:
+        blocked = worker.run({"user": "второй вопрос", "session": session})
+        assert blocked["state"] == "in_progress" and "беседу" in blocked["reason"]
+        other = worker.run({"user": "вопрос", "session": "беседа-2"})
+        assert other["state"] == "answered"          # чужая беседа не мешает
+    finally:
+        let_go(busy)
+    assert worker.run({"user": "второй вопрос", "session": session})["state"] == "answered"
+
+
+def test_relative_account_folder_becomes_absolute(tmp_path, monkeypatch):
+    from agent_workers.base import Profile
+    from agent_workers.config import Settings
+
+    monkeypatch.chdir(tmp_path)
+    assert Profile("x", Path(".agent")).home == (tmp_path / ".agent").resolve()
+    (tmp_path / ".env").write_text("AGENT_PROVIDER=claude" + chr(10) + "AGENT_HOME=.agent",
+                                   encoding="utf-8")
+    settings = Settings.load(tmp_path)
+    assert settings.home.is_absolute() and settings.runs.is_absolute()
+
+
+def test_relative_executable_becomes_absolute(tmp_path, monkeypatch):
+    from agent_workers.providers import common
+
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "claude").write_text("", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    found = common.find_executable("./bin/claude", "AGENT_CLAUDE_BINARY", "claude")
+    assert Path(found).is_absolute() and Path(found) == (tmp_path / "bin" / "claude").resolve()
+
+
+def test_stopping_a_turn_kills_its_grandchildren(tmp_path):
+    """Иначе внук CLI переживёт ход и продолжит писать в папку, которую уже забирают."""
+    if os.name == "nt":
+        pytest.skip("на Windows проверяется вручную через taskkill /T")
+    import time
+
+    from agent_workers.base.process import supervise
+
+    pid_file = tmp_path / "grandchild.pid"
+    command = Command((sys.executable, str(Path(__file__).with_name("spawning_child.py")),
+                       str(pid_file)), dict(os.environ), tmp_path)
+    outcome = supervise(command, stdout=tmp_path / "out", stderr=tmp_path / "err", timeout=1.0)
+    assert outcome.interruption == "timeout"
+    grandchild = int(pid_file.read_text(encoding="utf-8"))
+
+    def gone(pid: int) -> bool:
+        # В контейнере без init убитый внук остаётся зомби: PID ещё есть, процесса нет.
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        status = Path(f"/proc/{pid}/status")
+        return status.is_file() and "State:" + chr(9) + "Z" in status.read_text()
+
+    for _ in range(50):
+        if gone(grandchild):
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("внук пережил снятие хода")
+

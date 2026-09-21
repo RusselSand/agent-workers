@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
@@ -14,6 +15,46 @@ from .contract import Command
 def hidden() -> dict:
     # Иначе каждый ход мигает консольным окном поверх работы пользователя.
     return {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
+
+def detached() -> dict:
+    """Ход запускается своей группой процессов: тогда его можно снять целиком.
+
+    CLI сама порождает потомков — оболочки, инструменты. Убить только её значит
+    оставить их жить с открытыми журналами хода, который мы уже считаем законченным.
+    """
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW
+                | subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def terminate_tree(process: subprocess.Popen) -> None:
+    """Снять процесс со всеми потомками: сначала вежливо, потом насильно."""
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        # Дерево целиком умеет снимать только taskkill; аналог Job Object без ctypes нет.
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                       capture_output=True, **hidden())
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
 
 
 @dataclass(frozen=True)
@@ -47,7 +88,7 @@ def supervise(command: Command, *, stdout: Path, stderr: Path, pulse=None, stop=
     try:
         with stdout.open("ab", buffering=0) as out, stderr.open("ab", buffering=0) as err:
             process = subprocess.Popen(command.argv, stdin=stdin, stdout=out, stderr=err,
-                                       cwd=command.cwd, env=dict(command.env), **hidden())
+                                       cwd=command.cwd, env=dict(command.env), **detached())
             started = last_sync = time.monotonic()
             try:
                 while process.poll() is None:
@@ -63,12 +104,7 @@ def supervise(command: Command, *, stdout: Path, stderr: Path, pulse=None, stop=
                     time.sleep(0.2)
             finally:
                 if process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait()
+                    terminate_tree(process)
                     interruption = interruption or "interrupted"
                 os.fsync(out.fileno())
                 os.fsync(err.fileno())

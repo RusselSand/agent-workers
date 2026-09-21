@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .contract import Adapter, Profile
-from .entry import Entry, digest, registry
+from .entry import Entry, digest, hold, let_go, registry
 from .guard import Guard, LimitPolicy
 from .outbox import Outbox
 from .process import capture, interactive, supervise
@@ -60,10 +60,20 @@ class Worker:
             # иначе второй вызов оплатит ту же работу, а состояние напишут оба сразу.
             return self.result("in_progress", entry, None, None, None,
                                reason="ход уже выполняется другим процессом")
+        conversation = None
         try:
+            session = request.get("session")
+            if session:
+                # Продолжения одной беседы идут по очереди: два --resume разом читали бы
+                # и дописывали одну и ту же историю наперегонки.
+                conversation = hold(self.root / ".sessions" / f"{digest(str(session))}.lock")
+                if conversation is None:
+                    return self.result("in_progress", entry, None, None, None,
+                                       reason="эту беседу сейчас продолжает другой ход")
             return self.attempt(entry, request, pulse=pulse, stop=stop, retry=retry,
                                 ensure_login=ensure_login)
         finally:
+            let_go(conversation)
             entry.release()
 
     def attempt(self, entry: Entry, request: Mapping[str, object], *,
