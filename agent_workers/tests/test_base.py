@@ -290,3 +290,37 @@ def test_failed_measurement_does_not_break_the_turn(tmp_path, profile):
 
     result = Worker(Broken(tmp_path), profile, tmp_path / "runs", QUIET).run({"user": "привет"})
     assert result["state"] == "answered" and result["before"] is None
+
+
+def test_running_entry_cannot_be_collected(tmp_path, profile):
+    """Снести папку идущего хода — значит выдернуть у него журналы и замок из-под ног."""
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
+    owner = Entry(tmp_path / "runs", "живой-ход")
+    owner.claim()
+    owner.update(state="running", started=True)
+    try:
+        with pytest.raises(RuntimeError, match="выполняется"):
+            worker.collect("живой-ход")
+    finally:
+        owner.release()
+    assert owner.folder.exists()
+    worker.collect("живой-ход")          # владелец ушёл — теперь можно
+    assert not owner.folder.exists()
+
+
+def test_new_entry_writes_nothing_before_it_is_owned(tmp_path):
+    """Иначе двое, пришедшие одновременно, затрут состояние друг друга."""
+    entry = Entry(tmp_path, "ход")
+    assert not entry.state_path.exists()
+    assert entry.meta["state"] == "prepared" and entry.attempted is False
+
+
+def test_latecomer_does_not_overwrite_the_live_state(tmp_path):
+    owner = Entry(tmp_path, "ход")
+    owner.claim()
+    owner.update(state="running", started=True)
+
+    latecomer = Entry(tmp_path, "ход")          # второй процесс на том же ключе
+    assert latecomer.claim() is False           # владения не получил
+    assert latecomer.meta["state"] == "running"  # и ничего не переписал
+    owner.release()

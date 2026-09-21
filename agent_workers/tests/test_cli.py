@@ -121,3 +121,19 @@ def test_empty_outbox_says_so(capsys):
 def test_collect_says_no_to_a_dangerous_key(capsys):
     assert cli.main(["collect", ".."]) == 2
     assert "ключ" in capsys.readouterr().err
+
+
+def test_collect_all_skips_what_is_busy(tmp_path, capsys):
+    from agent_workers.base import Entry
+
+    ready_entry(tmp_path)
+    busy = Entry(tmp_path / "учётка" / "runs", "занятый")
+    busy.claim()
+    busy.update(state="answered")
+    try:
+        assert cli.main(["collect", "--all"]) == 0
+    finally:
+        busy.release()
+    printed = capsys.readouterr().out
+    assert "забрано: 1" in printed and "занято: 1" in printed
+    assert busy.folder.exists()

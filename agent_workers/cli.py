@@ -59,17 +59,21 @@ def pending(worker: Worker) -> int:
 def collect(worker: Worker, options) -> int:
     """Забрали — сносим. Пока не забрали, результат лежит и ждёт."""
     if options.all:
-        taken = worker.pending()
-        for entry in taken:
-            worker.collect(entry)
-        print(f"забрано: {len(taken)}")
+        taken, busy = 0, 0
+        for entry in worker.pending():
+            try:
+                worker.collect(entry)
+                taken += 1
+            except RuntimeError:
+                busy += 1      # кто-то работает с этой папкой: придём в следующий раз
+        print(f"забрано: {taken}" + (f", занято: {busy}" if busy else ""))
         return 0
     if not options.key:
         print("нужен ключ хода или --all", file=sys.stderr)
         return 2
     try:
         worker.collect(options.key)
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         print(exc, file=sys.stderr)     # ключ приходит от человека, трассировка ему ни к чему
         return 2
     print(f"забрано: {options.key}")

@@ -12,8 +12,10 @@ import json
 import os
 import shutil
 from pathlib import Path
+from uuid import uuid4
 
 RESERVED = (".", "..")
+EMPTY = {"state": "prepared", "started": False, "session_id": None, "pid": None}
 
 
 def digest(value) -> str:
@@ -45,8 +47,6 @@ class Entry:
         self.folder.mkdir(parents=True, exist_ok=True)
         self.state_path = self.folder / "state.json"
         self.lock = None
-        if not self.state_path.exists():
-            self._write({"state": "prepared", "started": False, "session_id": None, "pid": None})
 
     @property
     def stdout(self) -> Path:
@@ -58,7 +58,13 @@ class Entry:
 
     @property
     def meta(self) -> dict:
-        return json.loads(self.state_path.read_text(encoding="utf-8"))
+        """Пока никто не владел папкой, состояния нет — и это не пустая заготовка."""
+        if not self.state_path.is_file():
+            return dict(EMPTY)
+        try:
+            return json.loads(self.state_path.read_text(encoding="utf-8"))
+        except ValueError:
+            return dict(EMPTY)
 
     @property
     def attempted(self) -> bool:
@@ -69,8 +75,9 @@ class Entry:
         self._write({**self.meta, **values})
 
     def _write(self, value: dict) -> None:
-        # Запись через временный файл: прерывание не оставит обрезанный state.json.
-        temporary = self.state_path.with_suffix(".tmp")
+        # Через временный файл, и имя у него своё на каждый процесс: два пишущих
+        # не должны спорить за один и тот же промежуточный файл.
+        temporary = self.state_path.with_name(f"state.{os.getpid()}.{uuid4().hex[:8]}.tmp")
         temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(self.state_path)
 
@@ -129,8 +136,9 @@ class Entry:
         archive.mkdir(exist_ok=True)
         keep = {self.state_path.name, "owner.lock"}
         for path in self.folder.iterdir():
-            if path.name not in keep and not path.name.startswith("attempt-"):
-                path.replace(archive / path.name)
+            if path.name in keep or path.name.startswith(("attempt-", "state.")):
+                continue
+            path.replace(archive / path.name)
         self._write({**self.meta, "state": "prepared", "started": False,
                      "pid": None, "attempt": attempt})
         return attempt

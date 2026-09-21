@@ -111,14 +111,21 @@ class Worker:
         return [entry for entry in entries if entry.meta.get("state") in DELIVERED]
 
     def collect(self, entry: Entry | str) -> None:
-        """Забрали — папку сносим. Сколько хранить, решает тот, кто забирает."""
-        if isinstance(entry, Entry):
-            entry.drop()
-            return
-        folder = folder_for(self.root, entry)   # ключ приходит снаружи, его проверяют
-        if not (folder / "state.json").is_file():
-            raise ValueError(f"Хода с таким ключом нет: {entry}")
-        Entry(self.root, entry).drop()
+        """Забрали — папку сносим. Сколько хранить, решает тот, кто забирает.
+
+        Сносим только под замком: пока ход идёт, его журналы и сам замок удалять
+        нельзя — процесс продолжит писать в снесённые файлы, а следующий вызов
+        заведёт новый замок и оплатит ту же работу второй раз.
+        """
+        if isinstance(entry, str):
+            folder = folder_for(self.root, entry)   # ключ приходит снаружи, его проверяют
+            if not (folder / "state.json").is_file():
+                raise ValueError(f"Хода с таким ключом нет: {entry}")
+            entry = Entry(self.root, folder.name)
+        if not entry.claim():
+            raise RuntimeError(f"Ход {entry.folder.name} выполняется прямо сейчас; "
+                               "забирать его нельзя")
+        entry.drop()
 
     def finished(self, entry: Entry) -> dict | None:
         """Готовый ответ стоит ноль: отдаём его, не трогая ни лимит, ни состояние."""
