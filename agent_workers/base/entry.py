@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import shutil
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
@@ -34,6 +35,26 @@ def private_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIR)
     make_private(path, PRIVATE_DIR)
     return path
+
+
+def atomic_write(path: Path, text: str) -> None:
+    """Файл подменяется целиком: читатель видит либо старое, либо новое, но не пустое.
+
+    Имя временного файла своё на каждый процесс — два пишущих не спорят за него.
+    На Windows подмена может споткнуться о читателя, открывшего цель на мгновение,
+    поэтому несколько коротких повторов.
+    """
+    private_dir(path.parent)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp")
+    temporary.write_text(text, encoding="utf-8")
+    make_private(temporary, PRIVATE_FILE)
+    for pause in (0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.3):
+        try:
+            temporary.replace(path)
+            return
+        except PermissionError:
+            time.sleep(pause)
+    temporary.replace(path)
 
 
 class Busy(RuntimeError):
@@ -163,13 +184,7 @@ class Entry:
         self._write({**self.meta, **values})
 
     def _write(self, value: dict) -> None:
-        # Через временный файл, и имя у него своё на каждый процесс: два пишущих
-        # не должны спорить за один и тот же промежуточный файл.
-        private_dir(self.folder)
-        temporary = self.state_path.with_name(f"state.{os.getpid()}.{uuid4().hex[:8]}.tmp")
-        temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-        make_private(temporary, PRIVATE_FILE)
-        temporary.replace(self.state_path)
+        atomic_write(self.state_path, json.dumps(value, ensure_ascii=False, indent=2))
 
     def read(self, relative: str, *, tail: int | None = None) -> str:
         path = self.folder / relative

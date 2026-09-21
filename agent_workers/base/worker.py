@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .contract import Adapter, Profile, Reply
-from .entry import Entry, digest, guarded, hold, let_go, private_dir, registry
+from .entry import Entry, atomic_write, digest, guarded, hold, let_go, registry
 from .guard import Guard, LimitPolicy
 from .outbox import Outbox
 from .process import capture, interactive, supervise
@@ -26,6 +27,9 @@ from .process import capture, interactive, supervise
 log = logging.getLogger(__name__)
 
 UNFINISHED = ("prepared", "reserved", "running", "captured")
+# Windows не даёт подменить файл, пока его кто-то читает, и наоборот: короткие повторы
+# на суммарную секунду с запасом перекрывают такое окно.
+RETRY_PAUSES = (0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.3)
 
 
 @dataclass
@@ -89,10 +93,16 @@ class Worker:
 
     def generation(self, session: object) -> int:
         """Сколько ходов этой беседы прошло через нас. Часть ключа хода."""
-        try:
-            return int(self.session_file(session, "gen").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return 0
+        path = self.session_file(session, "gen")
+        for pause in RETRY_PAUSES:
+            try:
+                return int(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                return 0
+            except (OSError, ValueError):
+                time.sleep(pause)   # подмена файла в этот самый миг: подождать, не нуль
+        # Нуль здесь означал бы «беседа не начиналась» и вернул бы старый ответ из лотка.
+        raise OSError(f"Номер беседы не прочитать: {path}")
 
     def advance(self, session: object, to: int) -> None:
         """Продвинуть беседу не меньше чем до `to`. Повторный вызов ничего не портит.
@@ -103,9 +113,8 @@ class Worker:
         with guarded(self.session_file(session, "gen.lock")):
             if self.generation(session) >= to:
                 return
-            path = self.session_file(session, "gen")
-            private_dir(path.parent)
-            path.write_text(str(to), encoding="utf-8")
+            # Подмена целиком: читатель без замка не увидит усечённый файл и нуль.
+            atomic_write(self.session_file(session, "gen"), str(to))
 
     def settle(self, entry: Entry) -> None:
         """Ответ получен — беседа продвинулась. Номер записан в самой папке, поэтому

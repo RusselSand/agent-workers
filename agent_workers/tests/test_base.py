@@ -912,3 +912,31 @@ def test_generation_never_moves_backwards(tmp_path, profile):
     assert worker.generation("беседа") == 2
     assert worker.session_file("беседа", "gen.lock").exists()   # обновление шло под замком
 
+
+def test_readers_never_see_an_empty_or_backwards_generation(tmp_path, profile):
+    """Пишущий подменяет файл целиком: читатель видит старое или новое, но не пустое."""
+    import threading
+
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
+    observed, stop = [], threading.Event()
+
+    def reader():
+        while not stop.is_set():
+            observed.append(worker.generation("беседа"))
+
+    watcher = threading.Thread(target=reader)
+    watcher.start()
+    try:
+        for step in range(1, 60):
+            worker.advance("беседа", step)
+    finally:
+        stop.set()
+        watcher.join()
+    # Читатель отстаёт как угодно, но никогда не видит ни пустого файла, ни отката.
+    assert observed and all(later >= earlier
+                            for earlier, later in zip(observed, observed[1:], strict=False))
+    first_seen = next(i for i, value in enumerate(observed) if value)
+    assert 0 not in observed[first_seen:]
+    assert worker.generation("беседа") == 59
+    assert not list(worker.session_file("беседа", "gen").parent.glob("*.tmp"))
+
