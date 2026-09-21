@@ -118,6 +118,12 @@ class Limits:
     exact: bool                     # False — снимок мог устареть, мерили не по своему вызову
     plan: str | None = None
     credits: Decimal | None = None  # есть не у всех: отсутствие — None, а не ноль
+    credits_unlimited: bool = False # провайдер сказал «без ограничений», числа нет
+
+    @property
+    def spendable(self) -> bool:
+        """Есть ли за что работать, когда окно выбрано: остаток или безлимит."""
+        return self.credits_unlimited or (self.credits or 0) > 0
 
     @property
     def worst(self) -> float | None:

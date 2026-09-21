@@ -64,6 +64,10 @@ def credits_of(raw: Mapping) -> Decimal | None:
     return decimal((raw.get("credits") or {}).get("balance"))
 
 
+def unlimited(raw: Mapping) -> bool:
+    return bool((raw.get("credits") or {}).get("unlimited"))
+
+
 def applicable(buckets: Mapping, model: str) -> dict:
     """Корзины бывают привязаны к модели: чужие ограничения нас не касаются.
 
@@ -262,9 +266,10 @@ class CodexAdapter:
         windows = rpc_windows(result, model)
         if not windows:
             return self.snapshot(profile, session=session)
+        summary = result.get("rateLimits") or {}
         return Limits(self.name, profile.name, windows, datetime.now(UTC), "app-server", True,
-                      plan=(result.get("rateLimits") or {}).get("planType"),
-                      credits=credits_of(result.get("rateLimits") or {}))
+                      plan=summary.get("planType"), credits=credits_of(summary),
+                      credits_unlimited=unlimited(summary))
 
     def rate_limits(self, profile: Profile) -> dict:
         """Три запроса подряд и ни одного хода модели: этот процесс не умеет её звать."""
@@ -301,7 +306,8 @@ class CodexAdapter:
         # Ни своего времени, ни отметки в записи — берём время файла, но не «сейчас».
         measured = when or datetime.fromtimestamp(path.stat().st_mtime, UTC)
         return Limits(self.name, profile.name, windows, measured, "rollout",
-                      session is not None, plan=raw.get("plan_type"), credits=credits_of(raw))
+                      session is not None, plan=raw.get("plan_type"), credits=credits_of(raw),
+                      credits_unlimited=unlimited(raw))
 
     def rollout(self, profile: Profile, *, session: str | None = None) -> Path | None:
         if session:

@@ -47,14 +47,26 @@ def terminate_tree(process: subprocess.Popen) -> None:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         return
+    # Ждём не лидера, а всю группу: лидер может выйти сразу, а потомок — не заметить
+    # сигнала и остаться с открытыми журналами хода.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if process.poll() is not None and not group_alive(process.pid):
+            return
+        time.sleep(0.1)
     try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+
+
+def group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 @dataclass(frozen=True)

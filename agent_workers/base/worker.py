@@ -62,19 +62,43 @@ class Worker:
                                reason="ход уже выполняется другим процессом")
         conversation = None
         try:
+            if not retry:
+                # Готовый ответ не трогает беседу — отдаём его, не дожидаясь её очереди.
+                done = self.finished(entry)
+                if done is not None:
+                    return done
             session = request.get("session")
             if session:
                 # Продолжения одной беседы идут по очереди: два --resume разом читали бы
                 # и дописывали одну и ту же историю наперегонки.
-                conversation = hold(self.root / ".sessions" / f"{digest(str(session))}.lock")
+                conversation = hold(self.session_file(session, "lock"))
                 if conversation is None:
                     return self.result("in_progress", entry, None, None, None,
                                        reason="эту беседу сейчас продолжает другой ход")
-            return self.attempt(entry, request, pulse=pulse, stop=stop, retry=retry,
-                                ensure_login=ensure_login)
+            result = self.attempt(entry, request, pulse=pulse, stop=stop, retry=retry,
+                                  ensure_login=ensure_login)
+            if session and result["state"] == "answered":
+                # Беседа продвинулась: тот же вопрос дальше — это уже другой ход.
+                self.advance(session)
+            return result
         finally:
             let_go(conversation)
             entry.release()
+
+    def session_file(self, session: object, suffix: str) -> Path:
+        return self.root / ".sessions" / f"{digest(str(session))}.{suffix}"
+
+    def generation(self, session: object) -> int:
+        """Сколько ходов этой беседы прошло через нас. Часть ключа хода."""
+        try:
+            return int(self.session_file(session, "gen").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return 0
+
+    def advance(self, session: object) -> None:
+        path = self.session_file(session, "gen")
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_text(str(self.generation(session) + 1), encoding="utf-8")
 
     def attempt(self, entry: Entry, request: Mapping[str, object], *,
                 pulse=None, stop=None, retry: bool = False, ensure_login: bool = False) -> dict:
@@ -155,6 +179,11 @@ class Worker:
         """
         effective = dict(self.adapter.fingerprint())
         effective.update({key: value for key, value in request.items() if value is not None})
+        session = request.get("session")
+        if session:
+            # Беседа — изменяемая: тот же вопрос после её продвижения даёт другой ответ,
+            # и старый нельзя выдавать из лотка. Номер хода в беседе входит в ключ.
+            effective["generation"] = self.generation(session)
         return digest({"adapter": self.adapter.name, "request": effective})
 
     def pending(self) -> list[Entry]:

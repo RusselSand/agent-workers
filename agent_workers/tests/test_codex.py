@@ -175,3 +175,12 @@ def test_proxy_and_certificates_reach_the_subprocess(monkeypatch, profile):
     assert env["NODE_EXTRA_CA_CERTS"] == "/etc/ssl/corp.pem"
     assert "AGENT_SECRET" not in env and env["CODEX_HOME"] == str(profile.home)
 
+
+def test_unlimited_credits_without_a_balance_are_still_credits(sample, profile):
+    from agent_workers.providers.codex import unlimited
+
+    result = json.loads(sample("codex-app-server.json"))
+    result["rateLimits"]["credits"] = {"hasCredits": True, "unlimited": True, "balance": None}
+    assert credits_of(result["rateLimits"]) is None
+    assert unlimited(result["rateLimits"]) is True
+

@@ -62,7 +62,7 @@ class Guard:
             return None if self.policy.on_unknown == "proceed" else "Лимит неизвестен"
         if self.policy.refuse_above is None or (limits.worst or 0) < self.policy.refuse_above:
             return None
-        if self.policy.spend_credits and (limits.credits or 0) > 0:
+        if self.policy.spend_credits and limits.spendable:
             return None
         return f"Окно выбрано на {limits.worst:.0f}%"
 

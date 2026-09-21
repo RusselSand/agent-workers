@@ -730,3 +730,78 @@ def test_stopping_a_turn_kills_its_grandchildren(tmp_path):
     else:
         pytest.fail("внук пережил снятие хода")
 
+
+def test_same_prompt_after_the_conversation_moved_on_is_a_new_turn(tmp_path, profile):
+    """«Продолжай» после того, как беседа продвинулась, — другой вопрос, не тот же ответ."""
+    worker = Worker(FakeAdapter(tmp_path, percent=[1.0] * 10), profile, tmp_path / "runs", QUIET)
+    first = worker.run({"user": "продолжай", "session": "беседа"})
+    assert first["state"] == "answered"
+
+    again = worker.run({"user": "продолжай", "session": "беседа"})  # беседа уже продвинулась
+    assert again["state"] == "answered"                             # выполнили заново
+    assert again["entry"].folder != first["entry"].folder
+
+    # Свой ключ задачи — единственный способ попросить именно тот, старый результат.
+    keyed = worker.run({"user": "вопрос", "session": "беседа"}, key="задача-7")
+    assert worker.run({"user": "вопрос", "session": "беседа"}, key="задача-7")["state"] == "resumed"
+    assert keyed["state"] == "answered"
+
+
+def test_generation_survives_a_crash_so_a_retry_still_resumes(tmp_path, profile):
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
+    key_before = worker.key_for({"user": "вопрос", "session": "беседа"})
+    worker.run({"user": "вопрос", "session": "беседа"})
+    # Тот же вопрос той же беседы, пока она не продвинулась дальше, — та же папка.
+    assert worker.key_for({"user": "вопрос", "session": "беседа"}) != key_before
+    assert worker.generation("беседа") == 1
+
+
+def test_ready_answer_is_served_while_the_conversation_is_busy(tmp_path, profile):
+    """Готовый ответ беседу не трогает — его отдают, не дожидаясь её очереди."""
+    from agent_workers.base.entry import hold, let_go
+
+    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
+    worker.run({"user": "первый", "session": "беседа"}, key="задача-1")
+    busy = hold(worker.session_file("беседа", "lock"))
+    try:
+        served = worker.run({"user": "первый", "session": "беседа"}, key="задача-1")
+        assert served["state"] == "resumed"
+        redo = worker.run({"user": "первый", "session": "беседа"}, key="задача-1", retry=True)
+        assert redo["state"] == "in_progress"          # а повтор — это новый ход, ждёт
+    finally:
+        let_go(busy)
+
+
+def test_unlimited_credits_keep_the_worker_going(tmp_path, profile):
+    guard = Guard(FakeAdapter(tmp_path), profile, QUIET)
+    spent = Limits("fake", "t", (Window("primary", 100.0),), datetime.now(UTC), "t", True,
+                   credits=None, credits_unlimited=True)
+    assert guard.blocked(spent) is None
+    assert guard.blocked(limits(100.0)) == "Окно выбрано на 100%"
+
+
+def test_stubborn_grandchild_is_killed_after_the_leader_exits(tmp_path):
+    """Лидер вышел по SIGTERM сразу, внук сигнал проигнорировал — его снимает SIGKILL."""
+    if os.name == "nt":
+        pytest.skip("группы процессов POSIX")
+    import time
+
+    from agent_workers.base.process import supervise
+
+    pid_file = tmp_path / "grandchild.pid"
+    command = Command((sys.executable, str(Path(__file__).with_name("stubborn_child.py")),
+                       str(pid_file)), dict(os.environ), tmp_path)
+    supervise(command, stdout=tmp_path / "out", stderr=tmp_path / "err", timeout=1.0)
+    grandchild = int(pid_file.read_text(encoding="utf-8"))
+    for _ in range(80):
+        try:
+            os.kill(grandchild, 0)
+        except ProcessLookupError:
+            break
+        status = Path(f"/proc/{grandchild}/status")
+        if status.is_file() and "State:" + chr(9) + "Z" in status.read_text():
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("упрямый внук пережил снятие хода")
+
