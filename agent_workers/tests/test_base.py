@@ -38,6 +38,9 @@ class FakeAdapter:
     asked: list = field(default_factory=list)
     reads: int = 0
 
+    def fingerprint(self):
+        return {"model": getattr(self, "model", "")}
+
     def environment(self, profile):
         return dict(os.environ)
 
@@ -438,7 +441,7 @@ def test_started_turn_takes_a_slot_in_the_outbox(tmp_path, profile):
     started.update(state="running")
     started.release()
 
-    assert worker.occupied() == 1
+    assert worker.outbox.occupied() == 1
     assert worker.pending() == []   # в лотке пусто, но место занято
     assert worker.run({"user": "привет"})["state"] == "outbox_full"
 
@@ -453,4 +456,85 @@ def test_retry_forgets_the_numbers_of_the_previous_attempt(tmp_path, profile):
     assert "usage" not in entry.meta and entry.meta["session_id"] is None
     assert entry.meta["attempt"] == 1 and entry.attempted is False
     entry.release()
+
+
+def test_disabled_measurement_is_not_an_unknown_quota(tmp_path, profile):
+    """Выключенный замер — решение вызывающего, а не повод всё запретить."""
+    policy = LimitPolicy(before=False, after=False, on_unknown="refuse")
+    result = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", policy).run({"user": "ок"})
+    assert result["state"] == "answered" and result["before"] is None
+
+
+def test_window_that_reset_mid_turn_is_not_counted_as_spending(tmp_path, profile):
+    """99% до и 1% после — это не «минус 98», это новый отсчёт."""
+    guard = Guard(FakeAdapter(tmp_path), profile, QUIET)
+    moment = datetime.now(UTC)
+    before = Limits("fake", "test", (Window("session", 99.0, resets_at=moment),
+                                     Window("week", 10.0, resets_at=moment)),
+                    moment, "test", True)
+    after = Limits("fake", "test", (Window("session", 1.0, resets_at=moment + timedelta(hours=5)),
+                                    Window("week", 11.0, resets_at=moment)),
+                   moment, "test", True)
+    assert guard.spent(before, after) == {"week": 1.0}
+
+
+def test_settings_that_change_execution_change_the_key(tmp_path, profile):
+    class Tuned(FakeAdapter):
+        model = "модель"
+        effort = "medium"
+
+        def fingerprint(self):
+            return {"model": self.model, "effort": self.effort}
+
+    worker = Worker(Tuned(tmp_path), profile, tmp_path / "runs", QUIET)
+    other = Worker(Tuned(tmp_path), profile, tmp_path / "runs", QUIET)
+    other.adapter.effort = "high"
+    assert worker.key_for({"user": "ок"}) != other.key_for({"user": "ок"})
+
+
+def test_broken_request_frees_the_slot_it_reserved(tmp_path, profile):
+    """Кривые задания не должны потихоньку забивать лоток."""
+    class Picky(FakeAdapter):
+        def ask(self, entry, request, profile):
+            raise ValueError("нет обязательного поля")
+
+    worker = Worker(Picky(tmp_path), profile, tmp_path / "runs", QUIET, max_pending=2)
+    for _ in range(3):
+        with pytest.raises(ValueError):
+            worker.run({"user": "плохое"})
+    assert worker.outbox.occupied() == 0
+    assert Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET,
+                  max_pending=2).run({"user": "хорошее"})["state"] == "answered"
+
+
+def test_loop_hands_the_stop_signal_to_the_tick(tmp_path):
+    """Сигнал во время долгого хода должен дойти до самого хода, а не ждать его конца."""
+    import threading
+
+    from agent_workers.base import run_loop
+
+    stop = threading.Event()
+    seen = []
+
+    def tick(signal):
+        seen.append(signal)
+        signal.set()          # как будто сигнал пришёл внутрь хода
+
+    assert run_loop(tick, poll_seconds=0, stop=stop) == 0
+    assert seen == [stop] and stop.is_set()
+
+
+def test_run_folder_is_readable_only_by_its_owner(tmp_path):
+    if os.name == "nt":
+        pytest.skip("на Windows права выставляются иначе")
+    entry = Entry(tmp_path, "ход")
+    entry.claim()
+    entry.update(state="answered")
+    entry.write("invocation/input.txt", "секретное задание")
+    try:
+        assert entry.folder.stat().st_mode & 0o077 == 0
+        assert entry.state_path.stat().st_mode & 0o077 == 0
+        assert (entry.folder / "invocation" / "input.txt").stat().st_mode & 0o077 == 0
+    finally:
+        entry.release()
 

@@ -156,3 +156,15 @@ def test_dry_run_does_not_touch_a_running_entry(tmp_path, capsys):
     assert owner.read("invocation/input.txt") == "задание идущего хода"
     assert "уже идёт" in capsys.readouterr().err
 
+
+def test_outbox_commands_work_without_the_provider_cli(tmp_path, monkeypatch, capsys):
+    """CLI может быть снесена или сломана обновлением — забрать готовое всё равно нужно."""
+    ready_entry(tmp_path)
+    for name in ("AGENT_CLAUDE_BINARY", "AGENT_CODEX_BINARY"):
+        monkeypatch.setenv(name, str(tmp_path / "такого-файла-нет"))
+
+    assert cli.main(["pending"]) == 0
+    assert "ключ-хода" in capsys.readouterr().out
+    assert cli.main(["collect", "--all"]) == 0
+    assert cli.main(["status"]) == 2          # а вот для статуса CLI уже нужна
+

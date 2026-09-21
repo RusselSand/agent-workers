@@ -21,21 +21,24 @@ def adapter():
     return CodexAdapter(executable=__file__)
 
 
-def test_app_server_answer_keeps_every_bucket(sample):
+def test_quota_is_read_from_the_bucket_of_our_model(sample):
+    """Общая корзина на 100% не должна запрещать ход модели, у которой своя пуста."""
     result = json.loads(sample("codex-app-server.json"))
-    windows = rpc_windows(result)
-    # Недельная корзина выбрана целиком, резервная пуста — по одной цифре этого не видно.
-    assert [(w.name, w.used_percent) for w in windows] == [
-        ("base_model_inference:primary", 0.0), ("codex:primary", 100.0)]
-    assert windows[0].window == timedelta(days=7)
-    assert windows[1].resets_at == datetime.fromtimestamp(1790258347, UTC)
+
+    luna = rpc_windows(result, "gpt-5.6-luna")     # у неё своя корзина
+    assert [(w.name, w.used_percent) for w in luna] == [("base_model_inference:primary", 0.0)]
+
+    sol = rpc_windows(result, "gpt-5.6-sol")       # своей нет — считаем по общей
+    assert [(w.name, w.used_percent) for w in sol] == [("codex:primary", 100.0)]
+    assert sol[0].window == timedelta(days=7)
+    assert sol[0].resets_at == datetime.fromtimestamp(1790258347, UTC)
     assert credits_of(result["rateLimits"]) == Decimal("184.5226000000")
 
 
 def test_single_bucket_answer_is_supported(sample):
     result = json.loads(sample("codex-app-server.json"))
     result.pop("rateLimitsByLimitId")
-    assert [w.name for w in rpc_windows(result)] == ["codex:primary"]
+    assert [w.name for w in rpc_windows(result, "gpt-5.6-sol")] == ["codex:primary"]
 
 
 def test_rollout_snapshot_is_the_fallback(sample):

@@ -40,6 +40,8 @@ def supervise(command: Command, *, stdout: Path, stderr: Path, pulse=None, stop=
     """Длинный ход. Журналы только дозаписываются, чтобы обрыв не уносил уже полученное."""
     pulse = pulse or (lambda: None)
     stop = stop or (lambda: False)
+    for journal in (stdout, stderr):
+        journal.touch(mode=0o600, exist_ok=True)
     stdin = command.stdin.open("rb") if command.stdin else subprocess.DEVNULL
     interruption = None
     try:

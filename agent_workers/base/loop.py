@@ -10,6 +10,11 @@ log = logging.getLogger(__name__)
 
 
 def run_loop(tick, *, once: bool = False, poll_seconds: float = 15, stop=None) -> int:
+    """Цикл зовёт tick(stop) и отдаёт ему тот же признак остановки.
+
+    Иначе сигнал, пришедший во время долгого хода, дождался бы только конца хода:
+    обработчик заменяет обычное завершение, и процесс висел бы до таймаута.
+    """
     stop = stop or threading.Event()
     previous = {}
     if threading.current_thread() is threading.main_thread():
@@ -18,7 +23,7 @@ def run_loop(tick, *, once: bool = False, poll_seconds: float = 15, stop=None) -
     try:
         while not stop.is_set():
             try:
-                tick()
+                tick(stop)
             except Exception as exc:
                 log.error("Ход не удался (%s); сохранённое состояние остаётся на месте",
                           type(exc).__name__)

@@ -187,6 +187,9 @@ class ClaudeAdapter:
         if not self.executable or not Path(self.executable).is_file():
             raise RuntimeError("Claude Code не найден")
 
+    def fingerprint(self) -> Mapping[str, str]:
+        return {"model": self.model}
+
     def environment(self, profile: Profile) -> Mapping[str, str]:
         profile.home.mkdir(parents=True, exist_ok=True)
         base = {k: v for k, v in os.environ.items() if k.upper() in ALLOWED}

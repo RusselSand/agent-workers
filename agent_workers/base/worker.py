@@ -18,13 +18,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .contract import Adapter, Profile
-from .entry import Busy, Entry, NotRemoved, digest, folder_for, registry
+from .entry import Entry, digest, registry
 from .guard import Guard, LimitPolicy
+from .outbox import Outbox
 from .process import capture, interactive, supervise
 
 log = logging.getLogger(__name__)
 
-DELIVERED = ("answered", "incomplete")   # ход кончился, результат ждёт получателя
 UNFINISHED = ("prepared", "running", "captured")
 
 
@@ -39,6 +39,7 @@ class Worker:
 
     def __post_init__(self) -> None:
         self.guard = Guard(self.adapter, self.profile, self.policy)
+        self.outbox = Outbox(self.root)
 
     def check(self) -> None:
         """Проверка подписочного входа. Бросает, если входа нет."""
@@ -79,7 +80,7 @@ class Worker:
         with registry(self.root):
             # Считаем и занимаем место разом: иначе несколько процессов, глядя на один
             # и тот же лоток, стартуют одновременно и перевалят за предел.
-            occupied = self.occupied()
+            occupied = self.outbox.occupied()
             if occupied >= self.max_pending:
                 # Лучше встать, чем молча забивать диск текстами, которые не забирают.
                 broken = self.result("outbox_full", entry, None, None, None,
@@ -92,12 +93,18 @@ class Worker:
             return broken
 
         before = self.guard.measure("before")
-        reason = self.guard.blocked(before)
+        # Выключенный замер — это решение вызывающего, а не неизвестный лимит.
+        reason = self.guard.blocked(before) if self.policy.before else None
         if reason:
             self.discard(entry)   # в папке ничего нет: ход не начинался
             return self.result("limit_reached", entry, None, before, None, reason=reason)
 
-        command = self.adapter.ask(entry, request, self.profile)
+        try:
+            command = self.adapter.ask(entry, request, self.profile)
+        except Exception:
+            # Место уже занято, а хода не будет: иначе кривые задания забьют лоток.
+            self.discard(entry)
+            raise
         entry.update(state="running", pid=os.getpid())
         outcome = supervise(command, stdout=entry.stdout, stderr=entry.stderr,
                             pulse=pulse, stop=stop, timeout=self.timeout)
@@ -110,50 +117,26 @@ class Worker:
         return self.result(state, entry, reply, before, after)
 
     def key_for(self, request: Mapping[str, object]) -> str:
-        """Ключ считаем от запроса вместе с моделью, которой он достанется.
+        """Ключ считаем от запроса вместе со всем, что влияет на выполнение.
 
-        Иначе смена AGENT_MODEL отдала бы старый ответ из лотка как свой: запрос тот же,
-        а отвечала другая модель.
+        Модель, усилие, режим песочницы — смена любого из них должна заводить новый ход:
+        иначе старый ответ выдался бы за ответ на других условиях.
         """
-        model = request.get("model") or getattr(self.adapter, "model", "")
-        return digest({"adapter": self.adapter.name, "request": {**request, "model": model}})
-
-    def entries(self) -> list[Entry]:
-        if not self.root.is_dir():
-            return []
-        return [Entry(self.root, path.name) for path in sorted(self.root.iterdir())
-                if path.is_dir() and (path / "state.json").is_file()]
-
-    def occupied(self) -> int:
-        """Занятые места: готовые результаты и уже начатые ходы."""
-        return sum(1 for entry in self.entries()
-                   if entry.meta.get("state") in DELIVERED or entry.meta.get("started"))
+        effective = dict(self.adapter.fingerprint())
+        effective.update({key: value for key, value in request.items() if value is not None})
+        return digest({"adapter": self.adapter.name, "request": effective})
 
     def pending(self) -> list[Entry]:
-        """Готовые результаты, которых ещё не забрали. Папка живёт, пока её не заберут."""
-        return [entry for entry in self.entries() if entry.meta.get("state") in DELIVERED]
+        return self.outbox.pending()
 
     def collect(self, entry: Entry | str) -> None:
-        """Забрали — папку сносим. Сколько хранить, решает тот, кто забирает.
-
-        Сносим только под замком: пока ход идёт, его журналы и сам замок удалять
-        нельзя — процесс продолжит писать в снесённые файлы, а следующий вызов
-        заведёт новый замок и оплатит ту же работу второй раз.
-        """
-        if isinstance(entry, str):
-            folder = folder_for(self.root, entry)   # ключ приходит снаружи, его проверяют
-            if not (folder / "state.json").is_file():
-                raise ValueError(f"Хода с таким ключом нет: {entry}")
-            entry = Entry(self.root, folder.name)
-        if not entry.claim():
-            raise Busy(f"Ход {entry.folder.name} выполняется прямо сейчас; забирать нельзя")
-        entry.drop()
+        self.outbox.collect(entry)
 
     def discard(self, entry: Entry) -> None:
         """Уборка после несостоявшегося хода: её отказ не должен ронять ответ вызывающему."""
         try:
             entry.drop()
-        except (OSError, NotRemoved) as exc:
+        except (OSError, RuntimeError) as exc:
             log.warning("Папку %s убрать не удалось: %s", entry.folder.name, exc)
 
     def finished(self, entry: Entry) -> dict | None:

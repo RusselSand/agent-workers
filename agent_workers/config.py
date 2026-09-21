@@ -39,8 +39,11 @@ def parse(text: str) -> dict[str, str]:
         key, _, value = line.partition("=")
         key = key.strip().removeprefix("export ").strip()
         value = value.strip()
-        if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
+        if value[:1] in ("\"", "'"):
+            # Кавычки закрываются раньше комментария: AGENT_MODEL="opus" # закреплено
+            quote = value[0]
+            closing = value.find(quote, 1)
+            value = value[1:closing] if closing > 0 else value[1:]
         else:
             value = value.split(" #")[0].strip()
         if key:

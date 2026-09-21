@@ -86,14 +86,29 @@ def credits_of(raw: Mapping) -> Decimal | None:
         return None
 
 
-def rpc_windows(result: Mapping) -> tuple[Window, ...]:
-    """Корзин несколько: у недельной может быть выбрано всё, а у резервной — ноль."""
+def applicable(buckets: Mapping, model: str) -> dict:
+    """Корзины бывают привязаны к модели: чужие ограничения нас не касаются.
+
+    Если какая-то корзина названа под нашу модель, считаем по ней. Иначе берём общие,
+    без привязки. Без этого общая корзина на 100% запретила бы ход модели, у которой
+    своя корзина пуста.
+    """
+    named = {key: bucket for key, bucket in buckets.items()
+             if bucket.get("normalModelSlug") == model}
+    if named:
+        return named
+    general = {key: bucket for key, bucket in buckets.items()
+               if not bucket.get("normalModelSlug")}
+    return general or dict(buckets)
+
+
+def rpc_windows(result: Mapping, model: str = "") -> tuple[Window, ...]:
     buckets = result.get("rateLimitsByLimitId")
     if not isinstance(buckets, dict) or not buckets:
         single = result.get("rateLimits")
         buckets = ({str(single.get("limitId") or "codex"): single}
                    if isinstance(single, dict) else {})
-    return tuple(bucket_windows(buckets, used="usedPercent",
+    return tuple(bucket_windows(applicable(buckets, model), used="usedPercent",
                                 duration="windowDurationMins", resets="resetsAt"))
 
 
@@ -182,6 +197,10 @@ class CodexAdapter:
         if not self.executable or not Path(self.executable).is_file():
             raise RuntimeError("Codex CLI не найден")
 
+    def fingerprint(self) -> Mapping[str, str]:
+        # Усилие и песочница уходят в командную строку — значит влияют на ответ.
+        return {"model": self.model, "effort": self.effort, "sandbox": self.sandbox}
+
     def environment(self, profile: Profile) -> Mapping[str, str]:
         profile.home.mkdir(parents=True, exist_ok=True)
         base = {k: v for k, v in os.environ.items() if k.upper() in ALLOWED}
@@ -268,7 +287,7 @@ class CodexAdapter:
         except Exception:
             # Протокол app-server помечен экспериментальным: его отказ — не авария.
             return self.snapshot(profile, session=session)
-        windows = rpc_windows(result)
+        windows = rpc_windows(result, self.model)
         if not windows:
             return self.snapshot(profile, session=session)
         return Limits(self.name, profile.name, windows, datetime.now(UTC), "app-server", True,

@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from .base.entry import Busy, Entry, NotRemoved
+from .base.outbox import Outbox
 from .base.worker import Worker
 from .build import ADAPTERS, build
 from .config import Settings
@@ -42,9 +43,9 @@ def status(worker: Worker) -> int:
     return 0
 
 
-def pending(worker: Worker) -> int:
+def pending(outbox: Outbox) -> int:
     """Что уже готово и ждёт получателя."""
-    waiting = worker.pending()
+    waiting = outbox.pending()
     if not waiting:
         print("лоток пуст")
         return 0
@@ -56,13 +57,13 @@ def pending(worker: Worker) -> int:
     return 0
 
 
-def collect(worker: Worker, options) -> int:
+def collect(outbox: Outbox, options) -> int:
     """Забрали — сносим. Пока не забрали, результат лежит и ждёт."""
     if options.all:
         taken, busy, failed = 0, 0, []
-        for entry in worker.pending():
+        for entry in outbox.pending():
             try:
-                worker.collect(entry)
+                outbox.collect(entry)
                 taken += 1
             except Busy:
                 busy += 1      # кто-то работает с этой папкой: придём в следующий раз
@@ -76,7 +77,7 @@ def collect(worker: Worker, options) -> int:
         print("нужен ключ хода или --all", file=sys.stderr)
         return 2
     try:
-        worker.collect(options.key)
+        outbox.collect(options.key)
     except (ValueError, Busy, NotRemoved, OSError) as exc:
         print(exc, file=sys.stderr)     # ключ приходит от человека, трассировка ему ни к чему
         return 2
@@ -194,9 +195,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     settings = Settings.load().override(provider=options.provider, home=options.home,
                                         model=options.model)
+    if options.command in ("pending", "collect"):
+        # Разобрать лоток можно и без CLI: она может быть снесена или сломана обновлением.
+        print(f"лоток: {settings.runs}", file=sys.stderr)
+        outbox = Outbox(settings.runs)
+        return pending(outbox) if options.command == "pending" else collect(outbox, options)
+
     try:
         worker = build(settings)
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:   # нет настроек или не найдена сама CLI
         print(exc, file=sys.stderr)
         return 2
 
@@ -207,8 +214,4 @@ def main(argv: list[str] | None = None) -> int:
         return worker.logout()
     if options.command == "status":
         return status(worker)
-    if options.command == "pending":
-        return pending(worker)
-    if options.command == "collect":
-        return collect(worker, options)
     return run(worker, options)

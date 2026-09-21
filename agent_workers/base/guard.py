@@ -61,12 +61,23 @@ class Guard:
 
     @staticmethod
     def spent(before: Limits | None, after: Limits | None) -> dict[str, float]:
-        """Цена хода в процентах окна — то, ради чего замер делается дважды."""
+        """Цена хода в процентах окна — то, ради чего замер делается дважды.
+
+        Окно, которое за время хода успело обнулиться, пропускаем: разница там
+        отрицательная и означает не расход, а начало нового отсчёта.
+        """
         if not before or not after:
             return {}
-        was = {window.name: window.used_percent for window in before.windows}
-        return {window.name: round(window.used_percent - was[window.name], 3)
-                for window in after.windows if window.name in was}
+        was = {window.name: window for window in before.windows}
+        spent = {}
+        for window in after.windows:
+            earlier = was.get(window.name)
+            if earlier is None or earlier.resets_at != window.resets_at:
+                continue
+            delta = round(window.used_percent - earlier.used_percent, 3)
+            if delta >= 0:
+                spent[window.name] = delta
+        return spent
 
 
 def now() -> datetime:

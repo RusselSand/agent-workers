@@ -18,6 +18,24 @@ from uuid import uuid4
 RESERVED = (".", "..")
 
 
+PRIVATE_DIR = 0o700
+PRIVATE_FILE = 0o600
+
+
+def make_private(path: Path, mode: int) -> None:
+    """В папке лежат запросы и ответы: соседу по машине их видеть незачем."""
+    try:
+        path.chmod(mode)
+    except OSError:      # на Windows права выставляются иначе, молча продолжаем
+        pass
+
+
+def private_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIR)
+    make_private(path, PRIVATE_DIR)
+    return path
+
+
 class Busy(RuntimeError):
     """Папкой владеет живой процесс."""
 
@@ -61,8 +79,9 @@ def registry(root: Path):
     а удаление снесло бы его журналы. Берётся на мгновение — только чтобы взятие
     папки и её удаление не наложились друг на друга.
     """
-    root.mkdir(parents=True, exist_ok=True)
+    private_dir(root)
     handle = (root / ".registry.lock").open("a+b")
+    make_private(root / ".registry.lock", PRIVATE_FILE)
     wait_lock(handle)
     try:
         yield
@@ -108,9 +127,10 @@ class Entry:
     def _write(self, value: dict) -> None:
         # Через временный файл, и имя у него своё на каждый процесс: два пишущих
         # не должны спорить за один и тот же промежуточный файл.
-        self.folder.mkdir(parents=True, exist_ok=True)
+        private_dir(self.folder)
         temporary = self.state_path.with_name(f"state.{os.getpid()}.{uuid4().hex[:8]}.tmp")
         temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+        make_private(temporary, PRIVATE_FILE)
         temporary.replace(self.state_path)
 
     def read(self, relative: str, *, tail: int | None = None) -> str:
@@ -124,8 +144,9 @@ class Entry:
 
     def write(self, relative: str, text: str) -> Path:
         path = self.folder / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
+        private_dir(path.parent)
         path.write_text(text, encoding="utf-8")
+        make_private(path, PRIVATE_FILE)
         return path
 
     def claim(self) -> bool:
@@ -137,8 +158,9 @@ class Entry:
         if self.lock is not None:
             return True
         with registry(self.folder.parent):
-            self.folder.mkdir(parents=True, exist_ok=True)
+            private_dir(self.folder)
             handle = (self.folder / "owner.lock").open("a+b")
+            make_private(self.folder / "owner.lock", PRIVATE_FILE)
             try:
                 take_lock(handle)
             except OSError:
@@ -166,8 +188,7 @@ class Entry:
         Переносим всё, кроме состояния и замка: что ещё лежит в папке, знает провайдер.
         """
         attempt = int(self.meta.get("attempt", 0)) + 1
-        archive = self.folder / f"attempt-{attempt}"
-        archive.mkdir(exist_ok=True)
+        archive = private_dir(self.folder / f"attempt-{attempt}")
         keep = {self.state_path.name, "owner.lock"}
         for path in self.folder.iterdir():
             if path.name in keep or path.name.startswith(("attempt-", "state.")):
