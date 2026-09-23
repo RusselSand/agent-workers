@@ -434,6 +434,27 @@ def test_foreign_directories_are_never_taken_for_entries(tmp_path, profile):
     assert (other / "state.json").exists()
 
 
+def test_a_key_that_names_a_foreign_folder_is_refused_not_wiped(tmp_path, profile):
+    """Ключ совпал с чужой папкой в общем каталоге: её нельзя ни взять, ни вычистить."""
+    adapter = FakeAdapter(tmp_path)
+    worker = worker_at(tmp_path, profile, adapter)
+    sessions = tmp_path / "runs" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "токен.json").write_text("секрет", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="не папка хода"):
+        worker.run({"user": "вопрос"}, key="sessions")
+    assert (sessions / "токен.json").read_text(encoding="utf-8") == "секрет"
+    assert not (sessions / LOCK).exists()
+    assert adapter.asked == []
+
+
+def test_empty_leftover_folder_is_taken_over(tmp_path, profile):
+    """Процесс упал между созданием папки и замка: пустая папка — наш след, её берём."""
+    (tmp_path / "runs" / "задача").mkdir(parents=True)
+    assert worker_at(tmp_path, profile).run({"user": "вопрос"}, key="задача")["state"] == "answered"
+
+
 def test_broken_reply_parsing_is_an_incomplete_result_not_a_crash(tmp_path, profile):
     class Unparseable(FakeAdapter):
         def reply(self, entry, profile):

@@ -155,9 +155,17 @@ class Entry:
 
         Замок держится операционной системой и снимается сама, когда владелец исчез,
         поэтому переживает и падение процесса, и перезапуск контейнера.
+
+        Чужую непустую папку с тем же именем не берём: став «нашей», она лишилась бы
+        содержимого при подготовке хода. Пустую — берём: это наш же след, если процесс
+        упал между созданием папки и замка.
         """
         if self.lock is not None:
             return True
+        if (self.folder.is_dir() and not is_entry(self.folder)
+                and any(self.folder.iterdir())):
+            raise ValueError(f"Папка {self.folder} — не папка хода: каталог ходов "
+                             "должен принадлежать воркеру, а не быть общим")
         private_dir(self.folder)
         handle = (self.folder / LOCK).open("a+b")
         make_private(self.folder / LOCK, PRIVATE_FILE)
