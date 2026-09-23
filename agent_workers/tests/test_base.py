@@ -611,59 +611,57 @@ def test_relative_executable_becomes_absolute(tmp_path, monkeypatch):
     assert Path(found).is_absolute() and Path(found) == (tmp_path / "bin" / "claude").resolve()
 
 
-def test_stopping_a_turn_kills_its_grandchildren(tmp_path):
-    """Иначе внук CLI переживёт ход и продолжит писать в папку, которую уже забирают."""
-    if os.name == "nt":
-        pytest.skip("на Windows проверяется вручную через taskkill /T")
+def gone(pid: int, *, tries: int = 80) -> bool:
+    """Процесс исчез. В контейнере без init убитый внук остаётся зомби: PID ещё есть,
+    а процесса нет — это тоже «исчез»."""
     import time
 
-    from agent_workers.base.process import supervise
-
-    pid_file = tmp_path / "grandchild.pid"
-    command = Command((sys.executable, str(Path(__file__).with_name("spawning_child.py")),
-                       str(pid_file)), dict(os.environ), tmp_path)
-    outcome = supervise(command, stdout=tmp_path / "out", stderr=tmp_path / "err", timeout=1.0)
-    assert outcome.interruption == "timeout"
-    grandchild = int(pid_file.read_text(encoding="utf-8"))
-
-    def gone(pid: int) -> bool:
-        # В контейнере без init убитый внук остаётся зомби: PID ещё есть, процесса нет.
+    for _ in range(tries):
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
             return True
         status = Path(f"/proc/{pid}/status")
-        return status.is_file() and "State:" + chr(9) + "Z" in status.read_text()
-
-    for _ in range(50):
-        if gone(grandchild):
-            break
+        if status.is_file() and "State:" + chr(9) + "Z" in status.read_text():
+            return True
         time.sleep(0.1)
-    else:
-        pytest.fail("внук пережил снятие хода")
+    return False
 
 
-def test_stubborn_grandchild_is_killed_after_the_leader_exits(tmp_path):
-    """Лидер вышел по SIGTERM сразу, внук сигнал проигнорировал — его снимает SIGKILL."""
-    if os.name == "nt":
-        pytest.skip("группы процессов POSIX")
-    import time
-
+def supervised(tmp_path, script: str, **options):
+    """Запустить подпроцесс из tests/ под надзором; вернуть исход и PID его внука."""
     from agent_workers.base.process import supervise
 
     pid_file = tmp_path / "grandchild.pid"
-    command = Command((sys.executable, str(Path(__file__).with_name("stubborn_child.py")),
-                       str(pid_file)), dict(os.environ), tmp_path)
-    supervise(command, stdout=tmp_path / "out", stderr=tmp_path / "err", timeout=1.0)
-    grandchild = int(pid_file.read_text(encoding="utf-8"))
-    for _ in range(80):
-        try:
-            os.kill(grandchild, 0)
-        except ProcessLookupError:
-            break
-        status = Path(f"/proc/{grandchild}/status")
-        if status.is_file() and "State:" + chr(9) + "Z" in status.read_text():
-            break
-        time.sleep(0.1)
-    else:
-        pytest.fail("упрямый внук пережил снятие хода")
+    command = Command((sys.executable, str(Path(__file__).with_name(script)), str(pid_file)),
+                      dict(os.environ), tmp_path)
+    outcome = supervise(command, stdout=tmp_path / "out", stderr=tmp_path / "err", **options)
+    return outcome, int(pid_file.read_text(encoding="utf-8"))
+
+
+POSIX_ONLY = pytest.mark.skipif(
+    os.name == "nt", reason="группы процессов POSIX; боевой запуск — в докере на Linux")
+
+
+@POSIX_ONLY
+def test_stopping_a_turn_kills_its_grandchildren(tmp_path):
+    """Иначе внук CLI переживёт ход и продолжит писать в папку, которую уже забирают."""
+    outcome, grandchild = supervised(tmp_path, "spawning_child.py", timeout=1.0)
+    assert outcome.interruption == "timeout"
+    assert gone(grandchild), "внук пережил снятие хода"
+
+
+@POSIX_ONLY
+def test_stubborn_grandchild_is_killed_after_the_leader_exits(tmp_path):
+    """Лидер вышел по SIGTERM сразу, внук сигнал проигнорировал — его снимает SIGKILL."""
+    _, grandchild = supervised(tmp_path, "stubborn_child.py", timeout=1.0)
+    assert gone(grandchild), "упрямый внук пережил снятие хода"
+
+
+@POSIX_ONLY
+def test_background_grandchild_is_reaped_after_a_normal_exit(tmp_path):
+    """CLI вышла сама, а её фоновый потомок остался: после хода в группе никого нет."""
+    outcome, grandchild = supervised(tmp_path, "leaving_child.py", timeout=30)
+    assert outcome.interruption is None
+    assert outcome.returncode == 0
+    assert gone(grandchild), "фоновый внук пережил ход"   # сам он спит минуту

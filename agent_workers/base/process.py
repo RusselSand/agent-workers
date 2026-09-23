@@ -30,10 +30,15 @@ def detached() -> dict:
 
 
 def terminate_tree(process: subprocess.Popen) -> None:
-    """Снять процесс со всеми потомками: сначала вежливо, потом насильно."""
-    if process.poll() is not None:
-        return
+    """Снять процесс со всеми потомками: сначала вежливо, потом насильно.
+
+    На Linux снимается вся группа, даже если лидер уже вышел сам: фоновый потомок
+    иначе пережил бы ход. На Windows сироту после выхода лидера не найти — это
+    известное ограничение, боевой запуск идёт в докере на Linux.
+    """
     if os.name == "nt":
+        if process.poll() is not None:
+            return
         # Дерево целиком умеет снимать только taskkill; аналог Job Object без ctypes нет.
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)],
                        capture_output=True, **hidden())
@@ -43,6 +48,8 @@ def terminate_tree(process: subprocess.Popen) -> None:
             process.kill()
             process.wait()
         return
+    if process.poll() is not None and not group_alive(process.pid):
+        return   # лидер вышел и никого после себя не оставил
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -116,8 +123,9 @@ def supervise(command: Command, *, stdout: Path, stderr: Path, pulse=None, stop=
                     time.sleep(0.2)
             finally:
                 if process.poll() is None:
-                    terminate_tree(process)
                     interruption = interruption or "interrupted"
+                # И после обычного выхода: в группе могли остаться фоновые потомки.
+                terminate_tree(process)
                 os.fsync(out.fileno())
                 os.fsync(err.fileno())
     finally:
