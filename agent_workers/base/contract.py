@@ -158,9 +158,12 @@ class Adapter(Protocol):
         """Во что ход обошёлся бы по API. None — если модель незнакома таблице."""
 
     def limits(self, profile: Profile, *, session: str | None = None,
-               model: str | None = None) -> Limits | None:
+               model: str | None = None,
+               fresh_within: timedelta | None = None) -> Limits | None:
         """Готовый замер или None, если у провайдера нет способа его получить.
 
         model — модель, которая пойдёт в ход: лимит считается по её корзине.
+        fresh_within — насколько старый запасной снимок ещё годится: искать старше незачем,
+        политика всё равно сочтёт его неизвестным.
         Процессы адаптер запускает только примитивами базы: process.capture и Channel.
         """

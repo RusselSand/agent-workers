@@ -66,8 +66,7 @@ def test_buckets_of_other_models_never_limit_us(sample, profile, monkeypatch):
     assert rpc_windows(result, "gpt-5.6-новая") == ()
 
     monkeypatch.setattr(CodexAdapter, "rate_limits", lambda self, profile: result)
-    monkeypatch.setattr(CodexAdapter, "snapshot",
-                        lambda self, profile, session=None, model=None: None)
+    monkeypatch.setattr(CodexAdapter, "snapshot", lambda self, profile, **_: None)
     limits = adapter().limits(profile, model="gpt-5.6-новая")
     assert limits is None                                    # лимит неизвестен
     assert Guard(adapter(), profile, LimitPolicy()).blocked(limits) is None   # решает политика
@@ -110,6 +109,33 @@ def test_fallback_snapshot_comes_from_a_turn_of_our_model(profile, monkeypatch):
     luna = adapter().limits(profile, model="gpt-5.6-luna")
     assert guard.blocked(luna) == "Окно выбрано на 100%"
     assert adapter().limits(profile, model="gpt-5.6-terra") is None   # своего снимка нет
+
+
+def test_fallback_looks_past_many_rollouts_of_other_models(profile, monkeypatch):
+    """Сессий других моделей может быть сколько угодно: ищем, пока снимок ещё свежий."""
+    import time
+
+    folder = profile.home / "sessions" / "2026" / "09" / "23"
+    folder.mkdir(parents=True)
+    now = time.time()
+    rollout_of(folder, "rollout-2026-09-23T09-00-00-sol.jsonl", "gpt-5.6-sol", "codex", 100)
+    os.utime(folder / "rollout-2026-09-23T09-00-00-sol.jsonl", (now - 600, now - 600))
+    for n in range(25):                                   # свежее, но чужая модель
+        name = f"rollout-2026-09-23T10-{n:02d}-00-luna.jsonl"
+        rollout_of(folder, name, "gpt-5.6-luna", "base_model_inference", 0)
+        os.utime(folder / name, (now - n, now - n))
+
+    def unavailable(self, profile):
+        raise RuntimeError("app-server не отвечает")
+
+    monkeypatch.setattr(CodexAdapter, "rate_limits", unavailable)
+    sol = adapter().limits(profile, model="gpt-5.6-sol")      # не по счёту: 25 чужих не помеха
+    assert [(w.name, w.used_percent) for w in sol.windows] == [("codex:primary", 100.0)]
+    fresh = adapter().limits(profile, model="gpt-5.6-sol", fresh_within=timedelta(hours=1))
+    assert fresh.worst == 100.0
+    # Снимок старше, чем политика готова верить, не ищем вовсе — лимит неизвестен.
+    assert adapter().limits(profile, model="gpt-5.6-sol",
+                            fresh_within=timedelta(minutes=5)) is None
 
 
 def test_single_bucket_answer_is_supported(sample):
@@ -168,6 +194,31 @@ def test_completed_turn_without_text_says_so(profile, tmp_path):
     reply = adapter().reply(entry, profile)
     assert reply.complete is False
     assert reply.diagnostic == "empty_result"
+
+
+def test_failed_turn_keeps_the_cli_error(profile, tmp_path):
+    """turn.failed: координатор должен получить причину, а не безымянный обрыв."""
+    entry = Entry(tmp_path, "run")
+    entry.write("stdout.jsonl", '{"type": "thread.started", "thread_id": "t"}\n'
+                                '{"type": "turn.started"}\n'
+                                '{"type": "turn.failed", "error": {"message": '
+                                '"model gpt-5.6-nova is not available"}}')
+    reply = adapter().reply(entry, profile)
+    assert reply.complete is False
+    assert reply.diagnostic == "cli_error: model gpt-5.6-nova is not available"
+
+    entry.write("stdout.jsonl", '{"type": "error", "message": "stream disconnected"}')
+    assert adapter().reply(entry, profile).diagnostic == "cli_error: stream disconnected"
+
+
+def test_error_on_the_way_does_not_spoil_a_completed_answer(sample, profile, tmp_path):
+    """Временная ошибка, а потом ход всё-таки завершился: это ответ, платить заново незачем."""
+    entry = Entry(tmp_path, "run")
+    entry.write("stdout.jsonl", '{"type": "error", "message": "reconnecting"}\n'
+                + sample("codex-exec.jsonl"))
+    reply = adapter().reply(entry, profile)
+    assert reply.complete is True
+    assert reply.diagnostic is None
 
 
 def test_every_turn_starts_a_new_session(tmp_path, profile):

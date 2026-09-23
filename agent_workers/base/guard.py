@@ -56,8 +56,8 @@ class Guard:
             if phase == "after" and self.policy.settle_delay:
                 self.sleep(self.policy.settle_delay)
             try:
-                latest = self.adapter.limits(self.profile, session=session,
-                                             model=model) or latest
+                latest = self.adapter.limits(self.profile, session=session, model=model,
+                                             fresh_within=self.policy.stale_after) or latest
             except Exception as exc:
                 # Замер — не цель работы: его отказ не должен ронять сам ход.
                 log.warning("Замер лимита (%s) не удался: %s", phase, type(exc).__name__)

@@ -63,7 +63,7 @@ class FakeAdapter:
         from decimal import Decimal
         return Cost(Decimal("0.01"), "USD", "table")
 
-    def limits(self, profile, *, session=None, model=None):
+    def limits(self, profile, *, session=None, model=None, fresh_within=None):
         self.reads += 1
         return limits(self.percent.pop(0) if self.percent else 0.0)
 
@@ -607,7 +607,7 @@ def test_stale_snapshot_counts_as_unknown(tmp_path, profile):
 
 def test_failed_measurement_does_not_break_the_turn(tmp_path, profile):
     class Broken(FakeAdapter):
-        def limits(self, profile, *, session=None, model=None):
+        def limits(self, profile, *, session=None, model=None, fresh_within=None):
             raise OSError("зонд недоступен")
 
     result = worker_at(tmp_path, profile, Broken(tmp_path)).run({"user": "привет"}, key="задача")
@@ -652,7 +652,7 @@ def test_measurement_uses_the_model_of_the_request(tmp_path, profile):
         model = "по-умолчанию"
         asked_models: list = []
 
-        def limits(self, profile, *, session=None, model=None):
+        def limits(self, profile, *, session=None, model=None, fresh_within=None):
             self.asked_models.append(model)
             return super().limits(profile, session=session, model=model)
 

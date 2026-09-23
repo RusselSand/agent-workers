@@ -298,7 +298,10 @@ class ClaudeAdapter:
         return common.table_price(reply, PRICES)
 
     def limits(self, profile: Profile, *, session: str | None = None,
-               model: str | None = None) -> Limits | None:
+               model: str | None = None,
+               fresh_within: timedelta | None = None) -> Limits | None:
+        # session и fresh_within требует протокол: запасной путь Claude — живой /usage,
+        # а не старые снимки, так что искать среди них нечего.
         model = model or self.model
         try:
             payload = self.usage(profile)

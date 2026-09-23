@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -118,6 +118,17 @@ def rollouts(home: Path):
     return sorted((home / "sessions").rglob("rollout-*.jsonl"), reverse=True)
 
 
+def recent_rollouts(home: Path) -> list[tuple[Path, datetime]]:
+    """Роллауты по времени последней записи, свежие сверху. Исчезнувшие по дороге — мимо."""
+    found = []
+    for path in rollouts(home):
+        try:
+            found.append((path, datetime.fromtimestamp(path.stat().st_mtime, UTC)))
+        except OSError:
+            continue
+    return sorted(found, key=lambda item: item[1], reverse=True)
+
+
 def snapshot_of(text: str, model: str | None = None) -> tuple[dict | None, datetime | None]:
     """Последний непустой снимок лимитов и время, которым его пометил сам Codex.
 
@@ -181,9 +192,27 @@ def last_usage(text: str) -> dict | None:
     return found
 
 
-def read_events(text: str) -> tuple[str | None, dict, bool, str]:
-    """Сессия, расход, дошёл ли ход до конца и текст ответа — из журнала `exec --json`."""
-    session, usage, complete, message = None, {}, False, ""
+@dataclass
+class Events:
+    """Что журнал `exec --json` сказал о ходе."""
+
+    session: str | None = None
+    usage: dict = field(default_factory=dict)
+    complete: bool = False
+    message: str = ""
+    failure: str | None = None   # текст отказа CLI: turn.failed или error
+
+
+def failure_of(item: Mapping) -> str:
+    """turn.failed несёт {"error": {"message": ...}}, событие error — {"message": ...}."""
+    error = item.get("error")
+    text = error.get("message") if isinstance(error, dict) else error
+    return str(text or item.get("message") or item.get("type"))
+
+
+def read_events(text: str) -> Events:
+    """Сессия, расход, исход хода и текст ответа — из журнала `exec --json`."""
+    events = Events()
     for line in text.splitlines():
         if not line.strip():
             continue
@@ -193,17 +222,21 @@ def read_events(text: str) -> tuple[str | None, dict, bool, str]:
             continue
         kind = item.get("type")
         if kind == "thread.started":
-            session = item.get("thread_id") or session
+            events.session = item.get("thread_id") or events.session
         elif kind == "turn.completed":
-            complete, usage = True, item.get("usage", {})
+            events.complete, events.usage = True, item.get("usage", {})
+        elif kind in ("turn.failed", "error"):
+            events.failure = failure_of(item)
         elif kind == "item.completed" and item.get("item", {}).get("type") == "agent_message":
-            message = item["item"].get("text", "") or message
-    return session, usage, complete, message
+            events.message = item["item"].get("text", "") or events.message
+    return events
 
 
-def verdict(complete: bool, text: str) -> str | None:
-    """Почему ход — не ответ: не дошёл до конца или дошёл, но без текста.
+def verdict(complete: bool, text: str, failure: str | None = None) -> str | None:
+    """Почему ход — не ответ: CLI отказала, не дошёл до конца или дошёл, но без текста.
     Молчать нельзя: иначе координатор получит неудачу без причины."""
+    if failure:
+        return "cli_error: " + failure    # как у Claude: текст отказа доходит до вызывающего
     if not complete:
         return "no_terminal_event"
     return None if text else "empty_result"
@@ -260,12 +293,15 @@ class CodexAdapter:
         return Command(argv, self.environment(profile), entry.folder, stdin)
 
     def reply(self, entry, profile: Profile) -> Reply:
-        session, usage, complete, message = read_events(entry.read("stdout.jsonl"))
-        text = entry.read("summary.txt") or message
-        done = complete and bool(text)
-        usage = self.turn_usage(profile, session) or usage
-        return Reply(text, session, done, verdict(complete, text), usage,
-                     tokens_of(usage), entry.meta.get("model") or self.model)
+        events = read_events(entry.read("stdout.jsonl"))
+        text = entry.read("summary.txt") or events.message
+        # Ход, завершённый с ответом, — ответ, даже если по дороге была ошибка: иначе повтор
+        # оплатил бы то, что уже получено. Отказ CLI объясняет только ход без ответа.
+        done = events.complete and bool(text)
+        usage = self.turn_usage(profile, events.session) or events.usage
+        return Reply(text, events.session, done,
+                     None if done else verdict(events.complete, text, events.failure),
+                     usage, tokens_of(usage), entry.meta.get("model") or self.model)
 
     def turn_usage(self, profile: Profile, session: str | None) -> dict | None:
         """Расход хода из роллаута сессии. Это справка к ответу: роллаут пропал или не
@@ -285,17 +321,19 @@ class CodexAdapter:
         return common.table_price(reply, PRICES)
 
     def limits(self, profile: Profile, *, session: str | None = None,
-               model: str | None = None) -> Limits | None:
+               model: str | None = None,
+               fresh_within: timedelta | None = None) -> Limits | None:
         # Модель берём ту, что пойдёт в ход: у неё может быть своя корзина лимита.
         model = model or self.model
+        since = datetime.now(UTC) - fresh_within if fresh_within else None
         try:
             result = self.rate_limits(profile)
         except Exception:
             # Протокол app-server помечен экспериментальным: его отказ — не авария.
-            return self.snapshot(profile, session=session, model=model)
+            return self.snapshot(profile, session=session, model=model, since=since)
         windows = rpc_windows(result, model)
         if not windows:
-            return self.snapshot(profile, session=session, model=model)
+            return self.snapshot(profile, session=session, model=model, since=since)
         balance, endless = rpc_credits(result, model)
         summary = result.get("rateLimits") or {}
         return Limits(self.name, profile.name, windows, datetime.now(UTC), "app-server", True,
@@ -325,7 +363,7 @@ class CodexAdapter:
         return event.get("result") or {}
 
     def snapshot(self, profile: Profile, *, session: str | None = None,
-                 model: str | None = None) -> Limits | None:
+                 model: str | None = None, since: datetime | None = None) -> Limits | None:
         """Запасной путь: те же цифры из роллаута, но, возможно, вчерашние.
 
         Своя сессия — снимок наш по построению. Без неё берём самый свежий роллаут, где
@@ -333,7 +371,7 @@ class CodexAdapter:
         лимит неизвестен, и решает политика.
         """
         wanted = None if session else model
-        path = self.rollout(profile, session=session, model=wanted)
+        path = self.rollout(profile, session=session, model=wanted, since=since)
         if path is None:
             return None
         raw, when = snapshot_of(path.read_text(encoding="utf-8", errors="ignore"), wanted)
@@ -347,11 +385,18 @@ class CodexAdapter:
                       credits_unlimited=unlimited(raw))
 
     def rollout(self, profile: Profile, *, session: str | None = None,
-                model: str | None = None) -> Path | None:
+                model: str | None = None, since: datetime | None = None) -> Path | None:
+        """Роллаут своей сессии или самый свежий с подходящим снимком.
+
+        Свежесть — по времени изменения, а не по числу файлов: сессий других моделей
+        может быть сколько угодно, а старше since снимок политике уже не годится.
+        """
         if session:
             match = [path for path in rollouts(profile.home) if path.stem.endswith(session)]
             return match[0] if match else None
-        for path in rollouts(profile.home)[:20]:
+        for path, modified in recent_rollouts(profile.home):
+            if since is not None and modified < since:
+                break
             if snapshot_of(path.read_text(encoding="utf-8", errors="ignore"), model)[0]:
                 return path
         return None
