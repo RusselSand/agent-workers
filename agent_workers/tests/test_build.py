@@ -4,12 +4,14 @@ import pytest
 from agent_workers import build
 from agent_workers.config import Settings
 
+from .stubs import cli_stub
+
 
 @pytest.fixture(autouse=True)
 def installed(monkeypatch):
     # Тесты не должны требовать установленных CLI: подсовываем существующий файл.
     for name in ("AGENT_CLAUDE_BINARY", "AGENT_CODEX_BINARY"):
-        monkeypatch.setenv(name, __file__)
+        monkeypatch.setenv(name, cli_stub())
 
 
 def settings_at(tmp_path, text=""):

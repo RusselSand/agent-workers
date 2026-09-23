@@ -247,7 +247,9 @@ def main(argv: list[str] | None = None) -> int:
             pending(outbox)
             return 0
         worker = build(settings)
-    except (ValueError, RuntimeError) as exc:   # настройки не читаются, не заданы или нет CLI
+    except (ValueError, RuntimeError, OSError) as exc:
+        # Настройки не читаются или не заданы, нет CLI, каталог ходов не прочитать
+        # (отобрали права, сбой тома): сообщение и код выхода, а не трассировка.
         print(exc, file=sys.stderr)
         return 2
 

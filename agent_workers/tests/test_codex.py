@@ -17,9 +17,11 @@ from agent_workers.providers.codex import (
     tokens_of as codex_tokens,
 )
 
+from .stubs import cli_stub
+
 
 def adapter():
-    return CodexAdapter(executable=__file__)
+    return CodexAdapter(executable=cli_stub())
 
 
 def test_quota_is_read_from_the_bucket_of_our_model(sample):

@@ -6,11 +6,13 @@ import pytest
 
 from agent_workers import cli
 
+from .stubs import cli_stub
+
 
 @pytest.fixture(autouse=True)
 def connection(tmp_path, monkeypatch):
     for name in ("AGENT_CLAUDE_BINARY", "AGENT_CODEX_BINARY"):
-        monkeypatch.setenv(name, __file__)
+        monkeypatch.setenv(name, cli_stub())
     monkeypatch.setenv("AGENT_PROVIDER", "claude")
     monkeypatch.setenv("AGENT_HOME", str(tmp_path / "учётка"))
     monkeypatch.chdir(tmp_path)
@@ -247,6 +249,21 @@ def test_empty_reply_is_explained_with_the_cli_diagnostic():
     assert cli.explain({"reason": "ход уже выполняется", "reply": None}) == (
         "ход уже выполняется")
     assert cli.explain({"reason": None, "reply": None}) == "ход не дал ответа"
+
+
+def test_unreadable_outbox_is_a_message_not_a_traceback(monkeypatch, capsys):
+    """Каталог ходов есть, но не читается: pending и collect --all отвечают сообщением."""
+    from agent_workers.base.outbox import Outbox
+
+    def unreadable(self):
+        raise PermissionError("[Errno 13] Permission denied: 'runs'")
+
+    monkeypatch.setattr(Outbox, "entries", unreadable)
+    for command in (["pending"], ["collect", "--all"]):
+        assert cli.main(command) == 2
+        err = capsys.readouterr().err
+        assert "Permission denied" in err
+        assert "Traceback" not in err
 
 
 def test_cli_that_cannot_start_is_a_message_not_a_traceback(monkeypatch, capsys):

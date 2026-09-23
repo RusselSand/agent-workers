@@ -102,6 +102,26 @@ def test_folder_lock_is_exclusive_between_processes(tmp_path):
     assert ask() == "free"
 
 
+def test_broken_lock_is_not_mistaken_for_a_running_turn(tmp_path, profile, monkeypatch):
+    """EIO или неподдерживаемые замки — поломка, а не «ход идёт»: иначе вечный in_progress."""
+    import errno
+
+    import agent_workers.base.entry as entry_module
+
+    def broken(handle):
+        raise OSError(errno.EIO, "ошибка ввода-вывода тома")
+
+    worker = worker_at(tmp_path, profile)
+    stale = Entry(tmp_path / "runs", "брошенный")
+    stale.update(state="answered")
+    monkeypatch.setattr(entry_module, "take_lock", broken)
+
+    with pytest.raises(OSError, match="ввода-вывода"):
+        worker.run({"user": "привет"}, key="задача")
+    with pytest.raises(OSError, match="ввода-вывода"):
+        worker.pending()
+
+
 def test_key_cannot_point_outside_the_folder(tmp_path):
     """Ключ приходит снаружи, а папку сносят рекурсивно: путь в ключе недопустим."""
     for key in ("..", ".", "", "../соседняя", "/abs", "C:/windows", "вложенный/путь"):

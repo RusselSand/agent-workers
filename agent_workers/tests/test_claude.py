@@ -12,9 +12,11 @@ from agent_workers.providers.claude import (
     window_name,
 )
 
+from .stubs import cli_stub
+
 
 def adapter():
-    return ClaudeAdapter(executable=__file__)  # файл существует: до запуска дело не доходит
+    return ClaudeAdapter(executable=cli_stub())  # до запуска дело не доходит
 
 
 def test_control_answer_becomes_windows(sample):

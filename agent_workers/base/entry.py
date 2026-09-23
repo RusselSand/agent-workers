@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
@@ -171,9 +172,11 @@ class Entry:
         make_private(self.folder / LOCK, PRIVATE_FILE)
         try:
             take_lock(handle)
-        except OSError:
+        except OSError as exc:
             handle.close()
-            return False
+            if held(exc):
+                return False
+            raise   # замок сломан, а не занят: «идёт ход» здесь было бы неправдой
         self.lock = handle
         return True
 
@@ -188,8 +191,10 @@ class Entry:
         try:
             try:
                 take_lock(handle)
-            except OSError:
-                return True
+            except OSError as exc:
+                if held(exc):
+                    return True
+                raise
             free_lock(handle)
             return False
         finally:
@@ -241,8 +246,20 @@ class Entry:
             raise NotRemoved(f"Папку хода не удалось снести: {self.folder}")
 
 
+def held(exc: OSError) -> bool:
+    """Замок занят другим процессом — или сломан? Только первое значит «ход идёт».
+
+    Любая другая ошибка замка (EIO, ENOLCK, замки не поддерживаются на этом томе)
+    выдала бы себя за чужой ход: задача навсегда застряла бы в in_progress, а папка
+    пропала бы из лотка. Такие ошибки пробрасываем.
+    """
+    return exc.errno in HELD
+
+
 if os.name == "nt":
     import msvcrt
+
+    HELD = {errno.EACCES}                       # так msvcrt отвечает на занятый участок
 
     def take_lock(handle) -> None:
         handle.seek(0)
@@ -253,6 +270,8 @@ if os.name == "nt":
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 else:
     import fcntl
+
+    HELD = {errno.EAGAIN, errno.EWOULDBLOCK}    # так flock с LOCK_NB отвечает на занятый
 
     def take_lock(handle) -> None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

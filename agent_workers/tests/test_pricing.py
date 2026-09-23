@@ -7,6 +7,8 @@ from agent_workers.providers.claude import tokens_of as claude_tokens
 from agent_workers.providers.codex import CodexAdapter
 from agent_workers.providers.codex import tokens_of as codex_tokens
 
+from .stubs import cli_stub
+
 
 def test_each_kind_of_token_is_priced_separately():
     cost = estimate(Usage(input=1_000_000, cached_input=1_000_000, cache_write=1_000_000,
@@ -42,8 +44,8 @@ def test_claude_tokens_separate_cache_from_fresh_input():
 def test_claude_uses_the_price_the_cli_reported(sample, profile, tmp_path):
     entry = Entry(tmp_path, "run")
     entry.write("stdout.jsonl", sample("claude-stream.jsonl"))
-    reply = ClaudeAdapter(executable=__file__).reply(entry, profile)
-    cost = ClaudeAdapter(executable=__file__).price(reply)
+    reply = ClaudeAdapter(executable=cli_stub()).reply(entry, profile)
+    cost = ClaudeAdapter(executable=cli_stub()).price(reply)
     assert (cost.amount, cost.source) == (Decimal("0.0231"), "cli")
 
 
@@ -51,13 +53,13 @@ def test_dated_snapshot_resolves_to_the_name_the_table_knows(sample, profile, tm
     """CLI называет модель со снимком даты, а прайс — по каноническому имени."""
     entry = Entry(tmp_path, "run")
     entry.write("stdout.jsonl", sample("claude-stream.jsonl"))
-    assert ClaudeAdapter(executable=__file__).reply(entry, profile).model == "claude-opus-5"
+    assert ClaudeAdapter(executable=cli_stub()).reply(entry, profile).model == "claude-opus-5"
 
 
 def test_claude_falls_back_to_the_table_when_the_cli_is_silent():
     reply = Reply("ok", tokens=Usage(input=1_000_000, output=1_000_000),
                   model="claude-opus-5", usage={})
-    cost = ClaudeAdapter(executable=__file__).price(reply)
+    cost = ClaudeAdapter(executable=cli_stub()).price(reply)
     assert cost.amount == Decimal("30.000000")
     assert cost.source.startswith("anthropic")
 
@@ -65,7 +67,7 @@ def test_claude_falls_back_to_the_table_when_the_cli_is_silent():
 def test_codex_is_priced_from_the_table(sample, profile, tmp_path):
     entry = Entry(tmp_path, "run")
     entry.write("stdout.jsonl", sample("codex-exec.jsonl"))
-    adapter = CodexAdapter(executable=__file__)
+    adapter = CodexAdapter(executable=cli_stub())
     reply = adapter.reply(entry, profile)
     assert codex_tokens(reply.usage).input == 18827
     cost = adapter.price(reply)
@@ -76,4 +78,4 @@ def test_codex_is_priced_from_the_table(sample, profile, tmp_path):
 
 def test_unknown_model_gives_no_number_instead_of_a_wrong_one():
     reply = Reply("ok", tokens=Usage(input=1000), model="gpt-6-unreleased")
-    assert CodexAdapter(executable=__file__).price(reply) is None
+    assert CodexAdapter(executable=cli_stub()).price(reply) is None
