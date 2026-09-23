@@ -25,7 +25,8 @@ def test_missing_cache_prices_fall_back_to_the_input_price():
 def test_free_cache_writes_cost_nothing():
     # У OpenAI запись в кеш не тарифицируется — в таблице это явный ноль, не пропуск.
     cost = estimate(Usage(cache_write=1_000_000), rates("4", "20", "0.4", "0"))
-    assert cost.amount == Decimal("0.000000") and cost.parts == {}
+    assert cost.amount == Decimal("0.000000")
+    assert cost.parts == {}
 
 
 def test_claude_tokens_separate_cache_from_fresh_input():
@@ -57,7 +58,8 @@ def test_claude_falls_back_to_the_table_when_the_cli_is_silent():
     reply = Reply("ok", tokens=Usage(input=1_000_000, output=1_000_000),
                   model="claude-opus-5", usage={})
     cost = ClaudeAdapter(executable=__file__).price(reply)
-    assert cost.amount == Decimal("30.000000") and cost.source.startswith("anthropic")
+    assert cost.amount == Decimal("30.000000")
+    assert cost.source.startswith("anthropic")
 
 
 def test_codex_is_priced_from_the_table(sample, profile, tmp_path):
@@ -68,7 +70,8 @@ def test_codex_is_priced_from_the_table(sample, profile, tmp_path):
     assert codex_tokens(reply.usage).input == 18827
     cost = adapter.price(reply)
     # 18827 входных по $4 и 5 выходных по $20 за миллион.
-    assert cost.amount == Decimal("0.075408") and cost.source.startswith("openai")
+    assert cost.amount == Decimal("0.075408")
+    assert cost.source.startswith("openai")
 
 
 def test_unknown_model_gives_no_number_instead_of_a_wrong_one():

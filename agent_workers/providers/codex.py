@@ -171,6 +171,26 @@ def last_usage(text: str) -> dict | None:
     return found
 
 
+def read_events(text: str) -> tuple[str | None, dict, bool, str]:
+    """Сессия, расход, дошёл ли ход до конца и текст ответа — из журнала `exec --json`."""
+    session, usage, complete, message = None, {}, False, ""
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        kind = item.get("type")
+        if kind == "thread.started":
+            session = item.get("thread_id") or session
+        elif kind == "turn.completed":
+            complete, usage = True, item.get("usage", {})
+        elif kind == "item.completed" and item.get("item", {}).get("type") == "agent_message":
+            message = item["item"].get("text", "") or message
+    return session, usage, complete, message
+
+
 def verdict(complete: bool, text: str) -> str | None:
     """Почему ход — не ответ: не дошёл до конца или дошёл, но без текста.
     Молчать нельзя: иначе координатор получит неудачу без причины."""
@@ -230,21 +250,7 @@ class CodexAdapter:
         return Command(argv, self.environment(profile), entry.folder, stdin)
 
     def reply(self, entry, profile: Profile) -> Reply:
-        session, usage, complete, message = None, {}, False, ""
-        for line in entry.read("stdout.jsonl").splitlines():
-            if not line.strip():
-                continue
-            try:
-                item = json.loads(line)
-            except ValueError:
-                continue
-            kind = item.get("type")
-            if kind == "thread.started":
-                session = item.get("thread_id") or session
-            elif kind == "turn.completed":
-                complete, usage = True, item.get("usage", {})
-            elif kind == "item.completed" and item.get("item", {}).get("type") == "agent_message":
-                message = item["item"].get("text", "") or message
+        session, usage, complete, message = read_events(entry.read("stdout.jsonl"))
         text = entry.read("summary.txt") or message
         done = complete and bool(text)
         usage = self.turn_usage(profile, session) or usage
@@ -273,10 +279,10 @@ class CodexAdapter:
         windows = rpc_windows(result, model)
         if not windows:
             return self.snapshot(profile, session=session)
-        credits, endless = rpc_credits(result, model)
+        balance, endless = rpc_credits(result, model)
         summary = result.get("rateLimits") or {}
         return Limits(self.name, profile.name, windows, datetime.now(UTC), "app-server", True,
-                      plan=summary.get("planType"), credits=credits, credits_unlimited=endless)
+                      plan=summary.get("planType"), credits=balance, credits_unlimited=endless)
 
     def rate_limits(self, profile: Profile) -> dict:
         """Три запроса подряд и ни одного хода модели: этот процесс не умеет её звать."""

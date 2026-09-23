@@ -170,7 +170,8 @@ def test_pending_lists_what_nobody_collected(tmp_path, capsys):
     ready_entry(tmp_path)
     assert cli.main(["pending"]) == 0
     printed = capsys.readouterr().out
-    assert "ключ-хода" in printed and "answered" in printed
+    assert "ключ-хода" in printed
+    assert "answered" in printed
 
 
 def test_collect_removes_the_folder(tmp_path, capsys):
@@ -221,7 +222,8 @@ def test_collect_all_skips_what_is_busy(tmp_path, capsys):
     finally:
         busy.release()
     printed = capsys.readouterr().out
-    assert "забрано: 1" in printed and "занято: 1" in printed
+    assert "забрано: 1" in printed
+    assert "занято: 1" in printed
     assert busy.folder.exists()
 
 
@@ -256,5 +258,7 @@ def test_invalid_request_is_a_concise_message_not_a_traceback(monkeypatch, capsy
     monkeypatch.setattr(worker_module.Worker, "run", rejecting)
     assert cli.main(["run", "привет"]) == 2
     err = capsys.readouterr().err
-    assert "запрос отклонён" in err and "Traceback" not in err and "login" not in err
+    assert "запрос отклонён" in err
+    assert "Traceback" not in err
+    assert "login" not in err
 

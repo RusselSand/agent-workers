@@ -24,9 +24,9 @@ def run_loop(tick, *, once: bool = False, poll_seconds: float = 15, stop=None) -
         while not stop.is_set():
             try:
                 tick(stop)
-            except Exception as exc:
-                log.error("Ход не удался (%s); сохранённое состояние остаётся на месте",
-                          type(exc).__name__)
+            except Exception:
+                # С трассировкой: иначе сбой в цикле не разобрать, а цикл живёт дальше.
+                log.exception("Ход не удался; сохранённое состояние остаётся на месте")
                 if once:
                     return 1
             if once:

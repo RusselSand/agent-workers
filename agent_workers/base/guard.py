@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -35,7 +36,7 @@ class Guard:
     adapter: Adapter
     profile: Profile
     policy: LimitPolicy = field(default_factory=LimitPolicy)
-    sleep: object = time.sleep
+    sleep: Callable[[float], None] = time.sleep
 
     def measure(self, phase: str, *, session: str | None = None,
                 model: str | None = None) -> Limits | None:

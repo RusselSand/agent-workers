@@ -112,8 +112,9 @@ def test_key_cannot_point_outside_the_folder(tmp_path):
 
 def test_key_is_required(tmp_path, profile):
     """Ключ — идентификатор задачи. Выводить его из текста запроса воркер не берётся."""
+    worker = worker_at(tmp_path, profile)
     with pytest.raises(TypeError):
-        worker_at(tmp_path, profile).run({"user": "привет"})
+        worker.run({"user": "привет"})
 
 
 def test_collect_refuses_a_key_that_is_a_path(tmp_path, profile):
@@ -128,18 +129,21 @@ def test_collect_refuses_a_key_that_is_a_path(tmp_path, profile):
 
 
 def test_collect_refuses_an_unknown_key(tmp_path, profile):
+    worker = worker_at(tmp_path, profile)
     with pytest.raises(ValueError, match="нет"):
-        worker_at(tmp_path, profile).collect("никогда-не-существовавший")
+        worker.collect("никогда-не-существовавший")
 
 
 def test_worker_measures_before_and_after_and_reports_the_price(tmp_path, profile):
     result = worker_at(tmp_path, profile).run({"user": "привет"}, key="задача")
     assert result["state"] == "answered"
     assert result["reply"].text == "привет"
-    assert result["before"].worst == 10.0 and result["after"].worst == 12.5
+    assert result["before"].worst == 10.0
+    assert result["after"].worst == 12.5
     assert result["spent"] == {"window": 2.5}
     # Рядом с ценой в процентах окна — во что тот же ход обошёлся бы по API.
-    assert result["tokens"].output == 1 and str(result["cost"].amount) == "0.01"
+    assert result["tokens"].output == 1
+    assert str(result["cost"].amount) == "0.01"
 
 
 def test_worker_refuses_before_spending_anything(tmp_path, profile):
@@ -159,9 +163,11 @@ def test_ready_answer_is_served_for_free(tmp_path, profile):
     reads, asked = adapter.reads, len(adapter.asked)
 
     again = worker.run({"user": "привет"}, key="задача")
-    assert again["state"] == "resumed" and again["reply"].text == "привет"
+    assert again["state"] == "resumed"
+    assert again["reply"].text == "привет"
     assert (adapter.reads, len(adapter.asked)) == (reads, asked)
-    assert again["before"] is None and again["spent"] == {}
+    assert again["before"] is None
+    assert again["spent"] == {}
 
 
 def test_same_text_under_another_key_is_a_new_turn(tmp_path, profile):
@@ -207,7 +213,8 @@ def test_answer_written_before_a_crash_is_not_paid_twice(tmp_path, profile):
     entry.update(state="running", pid=999_999_999)     # владельца нет: замок никто не держит
 
     served = worker.run({"user": "привет"}, key="задача")
-    assert served["state"] == "resumed" and served["reply"].text == "привет"
+    assert served["state"] == "resumed"
+    assert served["reply"].text == "привет"
     assert adapter.asked == []                          # второй раз не платили
     assert entry.meta["state"] == "answered"
 
@@ -220,7 +227,8 @@ def test_abandoned_attempt_is_run_again(tmp_path, profile):
     entry.update(state="running", pid=999_999_999)
 
     again = worker_at(tmp_path, profile, adapter).run({"user": "привет"}, key="задача")
-    assert again["state"] == "answered" and again["reply"].text == "привет"
+    assert again["state"] == "answered"
+    assert again["reply"].text == "привет"
     assert len(adapter.asked) == 1
 
 
@@ -312,7 +320,8 @@ def test_broken_request_leaves_no_folder_behind(tmp_path, profile):
     worker = worker_at(tmp_path, profile, Picky(tmp_path))
     with pytest.raises(ValueError):
         worker.run({"user": "плохое"}, key="задача")
-    assert worker.pending() == [] and not any((tmp_path / "runs").iterdir())
+    assert worker.pending() == []
+    assert not any((tmp_path / "runs").iterdir())
 
 
 def test_interrupt_while_building_the_request_leaves_no_folder_behind(tmp_path, profile):
@@ -404,7 +413,8 @@ def test_interrupted_turn_ends_up_in_the_outbox_not_in_limbo(tmp_path, profile):
         worker_module.supervise = keep
 
     stuck = worker.pending()
-    assert len(stuck) == 1 and stuck[0].meta["state"] == "incomplete"
+    assert len(stuck) == 1
+    assert stuck[0].meta["state"] == "incomplete"
     worker.collect(stuck[0])
     assert worker.pending() == []
 
@@ -601,14 +611,16 @@ def test_failed_measurement_does_not_break_the_turn(tmp_path, profile):
             raise OSError("зонд недоступен")
 
     result = worker_at(tmp_path, profile, Broken(tmp_path)).run({"user": "привет"}, key="задача")
-    assert result["state"] == "answered" and result["before"] is None
+    assert result["state"] == "answered"
+    assert result["before"] is None
 
 
 def test_disabled_measurement_is_not_an_unknown_quota(tmp_path, profile):
     """Выключенный замер — решение вызывающего, а не повод всё запретить."""
     policy = LimitPolicy(before=False, after=False, on_unknown="refuse")
     result = worker_at(tmp_path, profile, policy=policy).run({"user": "ок"}, key="задача")
-    assert result["state"] == "answered" and result["before"] is None
+    assert result["state"] == "answered"
+    assert result["before"] is None
 
 
 def test_window_that_reset_mid_turn_is_not_counted_as_spending(tmp_path, profile):
@@ -646,7 +658,8 @@ def test_measurement_uses_the_model_of_the_request(tmp_path, profile):
 
     adapter = Watching(tmp_path, percent=[1.0, 1.0, 1.0])
     worker_at(tmp_path, profile, adapter).run({"user": "ок", "model": "другая"}, key="задача")
-    assert adapter.asked_models and set(adapter.asked_models) == {"другая"}
+    assert adapter.asked_models
+    assert set(adapter.asked_models) == {"другая"}
 
 
 def test_no_measurement_after_a_requested_stop(tmp_path, profile):
@@ -661,7 +674,8 @@ def test_no_measurement_after_a_requested_stop(tmp_path, profile):
         result = worker_at(tmp_path, profile, adapter).run({"user": "ок"}, key="задача")
     finally:
         worker_module.supervise = keep
-    assert result["after"] is None and adapter.reads == 1
+    assert result["after"] is None
+    assert adapter.reads == 1
 
 
 def test_loop_hands_the_stop_signal_to_the_tick(tmp_path):
@@ -678,7 +692,8 @@ def test_loop_hands_the_stop_signal_to_the_tick(tmp_path):
         signal.set()          # как будто сигнал пришёл внутрь хода
 
     assert run_loop(tick, poll_seconds=0, stop=stop) == 0
-    assert seen == [stop] and stop.is_set()
+    assert seen == [stop]
+    assert stop.is_set()
 
 
 def test_relative_account_folder_becomes_absolute(tmp_path, monkeypatch):
@@ -690,7 +705,8 @@ def test_relative_account_folder_becomes_absolute(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text("AGENT_PROVIDER=claude" + chr(10) + "AGENT_HOME=.agent",
                                    encoding="utf-8")
     settings = Settings.load(tmp_path)
-    assert settings.home.is_absolute() and settings.runs.is_absolute()
+    assert settings.home.is_absolute()
+    assert settings.runs.is_absolute()
 
 
 def test_relative_executable_becomes_absolute(tmp_path, monkeypatch):
@@ -700,7 +716,8 @@ def test_relative_executable_becomes_absolute(tmp_path, monkeypatch):
     (tmp_path / "bin" / "claude").write_text("", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     found = common.find_executable("./bin/claude", "AGENT_CLAUDE_BINARY", "claude")
-    assert Path(found).is_absolute() and Path(found) == (tmp_path / "bin" / "claude").resolve()
+    assert Path(found).is_absolute()
+    assert Path(found) == (tmp_path / "bin" / "claude").resolve()
 
 
 def gone(pid: int, *, tries: int = 80) -> bool:

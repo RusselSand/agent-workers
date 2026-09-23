@@ -31,7 +31,7 @@ def test_quota_is_read_from_the_bucket_of_our_model(sample):
 
     sol = rpc_windows(result, "gpt-5.6-sol")       # своей нет — считаем по общей
     assert [(w.name, w.used_percent) for w in sol] == [("codex:primary", 100.0)]
-    assert sol[0].window == timedelta(days=7)
+    assert sol[0].duration == timedelta(days=7)
     assert sol[0].resets_at == datetime.fromtimestamp(1790258347, UTC)
     assert credits_of(result["rateLimits"]) == Decimal("184.5226000000")
 
@@ -131,7 +131,8 @@ def test_snapshot_reads_our_own_session(sample, profile):
     (folder / f"rollout-2026-09-21T11-21-25-{session}.jsonl").write_text(
         sample("codex-rollout.jsonl"), encoding="utf-8")
     ours = adapter().snapshot(profile, session=session)
-    assert ours.exact is True and ours.source == "rollout"
+    assert ours.exact is True
+    assert ours.source == "rollout"
     # Без сессии снимок находится тоже, но считается неточным.
     assert adapter().snapshot(profile).exact is False
     assert adapter().snapshot(profile, session="0" * 36) is None
@@ -201,7 +202,8 @@ def test_proxy_and_certificates_reach_the_subprocess(monkeypatch, profile):
     env = common.environment(profile, "CODEX_HOME")
     assert env["HTTPS_PROXY"] == "http://proxy.local:3128"
     assert env["NODE_EXTRA_CA_CERTS"] == "/etc/ssl/corp.pem"
-    assert "AGENT_SECRET" not in env and env["CODEX_HOME"] == str(profile.home)
+    assert "AGENT_SECRET" not in env
+    assert env["CODEX_HOME"] == str(profile.home)
 
 
 def test_account_folder_is_created_private(tmp_path):

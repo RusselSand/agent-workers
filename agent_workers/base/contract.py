@@ -96,7 +96,7 @@ class Window:
 
     name: str
     used_percent: float
-    window: timedelta | None = None
+    duration: timedelta | None = None
     resets_at: datetime | None = None
     resets_hint: str | None = None  # когда провайдер даёт только текст, без точного времени
 
@@ -104,7 +104,7 @@ class Window:
         # Замер, которому нельзя верить, хуже отсутствующего: на нём строится отказ.
         if isinstance(self.used_percent, bool) or not 0 <= self.used_percent <= 100:
             raise ValueError(f"Недопустимая доля окна: {self.used_percent!r}")
-        if self.window is not None and self.window <= timedelta(0):
+        if self.duration is not None and self.duration <= timedelta(0):
             raise ValueError("Недопустимая длительность окна")
 
 

@@ -47,35 +47,39 @@ def status(worker: Worker) -> int:
     return 0
 
 
-def pending(outbox: Outbox) -> int:
+def pending(outbox: Outbox) -> None:
     """Что уже готово и ждёт получателя."""
     waiting = outbox.pending()
     if not waiting:
         print("лоток пуст")
-        return 0
+        return
     for entry in waiting:
         print(f"{entry.folder.name}  {entry.outcome}  модель {entry.meta.get('model') or '—'}")
     print()
     print(f"всего {len(waiting)}; забрать: python -m agent_workers collect <ключ|--all>")
-    return 0
+
+
+def collect_all(outbox: Outbox) -> int:
+    """Забрать всё, чем никто не занят. Занятые папки пропускаем до следующего раза."""
+    taken, busy, failed = 0, 0, []
+    for entry in outbox.entries():
+        try:
+            outbox.collect(entry)
+            taken += 1
+        except Busy:
+            busy += 1      # кто-то работает с этой папкой: придём в следующий раз
+        except (NotRemoved, OSError) as exc:
+            failed.append(str(exc))
+    print(f"забрано: {taken}" + (f", занято: {busy}" if busy else ""))
+    for message in failed:
+        print(message, file=sys.stderr)
+    return 1 if failed else 0
 
 
 def collect(outbox: Outbox, options) -> int:
     """Забрали — сносим. Пока не забрали, результат лежит и ждёт."""
     if options.all:
-        taken, busy, failed = 0, 0, []
-        for entry in outbox.entries():
-            try:
-                outbox.collect(entry)
-                taken += 1
-            except Busy:
-                busy += 1      # кто-то работает с этой папкой: придём в следующий раз
-            except (NotRemoved, OSError) as exc:
-                failed.append(str(exc))
-        print(f"забрано: {taken}" + (f", занято: {busy}" if busy else ""))
-        for message in failed:
-            print(message, file=sys.stderr)
-        return 1 if failed else 0
+        return collect_all(outbox)
     if not options.key:
         print("нужен ключ хода или --all", file=sys.stderr)
         return 2
@@ -238,7 +242,10 @@ def main(argv: list[str] | None = None) -> int:
             # Разобрать лоток можно и без CLI: она может быть снесена или сломана обновлением.
             outbox = Outbox(settings.runs)
             print(f"лоток: {outbox.root}", file=sys.stderr)
-            return pending(outbox) if options.command == "pending" else collect(outbox, options)
+            if options.command == "collect":
+                return collect(outbox, options)
+            pending(outbox)
+            return 0
         worker = build(settings)
     except (ValueError, RuntimeError) as exc:   # настройки не читаются, не заданы или нет CLI
         print(exc, file=sys.stderr)

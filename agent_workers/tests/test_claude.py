@@ -6,6 +6,7 @@ import pytest
 from agent_workers.base import Entry
 from agent_workers.providers.claude import (
     ClaudeAdapter,
+    concerns,
     control_windows,
     usage_windows,
     window_name,
@@ -20,7 +21,8 @@ def test_control_answer_becomes_windows(sample):
     payload = json.loads(sample("claude-get-usage.json"))
     windows = control_windows(payload["rate_limits"])
     assert [w.name for w in windows] == ["session", "weekly_all", "weekly_scoped:fable"]
-    assert windows[0].used_percent == 10 and windows[0].window == timedelta(hours=5)
+    assert windows[0].used_percent == 10
+    assert windows[0].duration == timedelta(hours=5)
     # В отличие от текстового /usage, здесь приходит точное время сброса.
     assert windows[1].resets_at == datetime.fromisoformat("2026-09-26T17:00:00.275587+00:00")
 
@@ -51,7 +53,30 @@ def test_printed_usage_is_the_fallback(sample):
     windows = usage_windows(json.loads(sample("claude-usage.json"))["result"])
     assert [w.name for w in windows] == ["session", "week", "week:fable"]
     # У текстового ответа нет года — точную дату отсюда не собрать, остаётся подсказка.
-    assert windows[0].resets_at is None and windows[0].resets_hint.startswith("Sep 21")
+    assert windows[0].resets_at is None
+    assert windows[0].resets_hint.startswith("Sep 21")
+
+
+def test_display_name_of_our_model_is_our_window(sample):
+    """«Claude Opus 5» из ответа — это claude-opus-5 из настроек: его окно нас касается."""
+    payload = json.loads(sample("claude-get-usage.json"))
+    scoped = next(row for row in payload["rate_limits"]["limits"] if row.get("scope"))
+    scoped["scope"]["model"] = {"display_name": "Claude Opus 5"}
+    names = [w.name for w in control_windows(payload["rate_limits"], "claude-opus-5")]
+    assert "weekly_scoped:claude_opus_5" in names
+
+    printed = "Current week (Claude Opus 5): 100% used · resets Sep 26, 7pm (Europe/Madrid)"
+    week = usage_windows(printed, "claude-opus-5")
+    assert [w.used_percent for w in week] == [100.0]
+    assert week[0].resets_hint == "Sep 26, 7pm (Europe/Madrid)"
+
+
+def test_model_names_match_by_whole_words():
+    assert concerns("Opus 4.8", "claude-opus-4-8")
+    assert concerns("Fable", "claude-fable-5-1")
+    assert not concerns("Opus 4", "claude-opus-45")         # не часть другого числа
+    assert not concerns("Sonnet", "claude-opus-5")
+    assert concerns("???", "claude-opus-5")                  # непонятное — считаем нашим
 
 
 def test_window_names_are_normalised():
@@ -84,8 +109,9 @@ def test_multiline_auth_status_is_accepted(sample):
 
 
 def test_login_without_subscription_is_refused():
+    claude = adapter()
     with pytest.raises(RuntimeError):
-        adapter().verify('{"loggedIn": true, "authMethod": "apiKey"}')
+        claude.verify('{"loggedIn": true, "authMethod": "apiKey"}')
 
 
 def test_turn_leaves_no_session_behind(profile, tmp_path):
@@ -113,7 +139,8 @@ def test_error_result_keeps_its_text_and_paid_tokens(profile, tmp_path):
     reply = adapter().reply(entry, profile)
     assert reply.complete is False
     assert "Rate limit reached" in reply.diagnostic
-    assert reply.tokens.input == 500 and reply.usage["total_cost_usd"] == 0.0025
+    assert reply.tokens.input == 500
+    assert reply.usage["total_cost_usd"] == 0.0025
 
 
 def test_successful_turn_without_text_is_not_an_answer(profile, tmp_path):
@@ -147,5 +174,6 @@ def test_partial_message_stream_is_not_requested(profile, tmp_path):
 
 def test_fallback_usage_probe_does_not_leave_sessions_behind(profile):
     argv = adapter().usage_command(profile).argv
-    assert "--no-session-persistence" in argv and "/usage" in argv
+    assert "--no-session-persistence" in argv
+    assert "/usage" in argv
 

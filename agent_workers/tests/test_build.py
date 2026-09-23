@@ -41,5 +41,6 @@ def test_model_and_policy_come_from_the_settings(tmp_path):
 
 
 def test_unknown_provider_is_named_not_guessed(tmp_path):
+    settings = settings_at(tmp_path, "AGENT_PROVIDER=gemini")
     with pytest.raises(ValueError, match="gemini"):
-        build(settings_at(tmp_path, "AGENT_PROVIDER=gemini"))
+        build(settings)

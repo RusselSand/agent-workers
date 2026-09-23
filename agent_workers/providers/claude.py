@@ -38,7 +38,8 @@ LEGACY = {"five_hour": timedelta(hours=5), "seven_day": timedelta(days=7),
           "seven_day_opus": timedelta(days=7), "seven_day_sonnet": timedelta(days=7)}
 
 # «Current week (all models): 22% used · resets Sep 26, 7pm (Europe/Madrid)»
-USAGE = re.compile(r"^Current ([^:]+):\s*(\d+(?:\.\d+)?)% used(?:\s*·\s*resets (.+?))?\s*$", re.M)
+# Хвост строки после «used» разбирается отдельно: без ленивых групп и перебора.
+USAGE = re.compile(r"^Current ([^:\n]+):[ \t]*(\d+(?:\.\d+)?)% used([^\n]*)$", re.M)
 
 DATED = re.compile(r"-\d{8}$")
 SOURCE = "anthropic, справочник claude-api (кэш 2026-06-24)"
@@ -96,15 +97,24 @@ def scoped_model(row: Mapping) -> str | None:
     return model.get("display_name") or model.get("id") or None
 
 
+def words(value: str) -> str:
+    """Имя модели словами через дефис: «Claude Opus 5», claude_opus_5 и claude-opus-5 —
+    одно и то же имя, записанное по-разному."""
+    return "-".join(re.findall(r"[a-z0-9]+", value.lower()))
+
+
 def concerns(scoped: str | None, model: str) -> bool:
     """Окно на весь аккаунт касается всех; окно модели — только её самой.
 
-    Управляющий протокол называет модель коротко («Fable», «Sonnet»), а в настройках
-    она идёт полным именем («claude-fable-5-1»), поэтому сравниваем по вхождению.
+    Управляющий протокол называет модель коротко («Fable») или отображаемым именем
+    («Claude Opus 5»), а в настройках она идёт идентификатором («claude-opus-5»).
+    Поэтому сравниваем по вхождению слов, с границами: «Opus 4» — не «opus-45».
+    Окно с непонятным именем считаем нашим: лишний отказ дешевле пропущенного лимита.
     """
     if not scoped or not model:
         return True
-    return slug(scoped) in slug(model)
+    wanted = words(scoped)
+    return not wanted or f"-{wanted}-" in f"-{words(model)}-"
 
 
 def row_name(row: Mapping) -> str:
@@ -151,13 +161,19 @@ def window_name(label: str) -> str:
     return "week" if inner[1] == "all models" else "week:" + inner[1]
 
 
+def resets_of(tail: str) -> str | None:
+    """« · resets Sep 26, 7pm (Europe/Madrid)» -> «Sep 26, 7pm (Europe/Madrid)»."""
+    _, found, hint = tail.partition("resets ")
+    return (hint.strip() or None) if found else None
+
+
 def usage_windows(text: str, model: str = "") -> tuple[Window, ...]:
     windows = []
-    for label, percent, resets in USAGE.findall(text):
+    for label, percent, tail in USAGE.findall(text):
         name = window_name(label)
         scoped = name.partition(":")[2] or None
         if concerns(scoped, model):
-            windows.append(Window(name, float(percent), resets_hint=(resets or None)))
+            windows.append(Window(name, float(percent), resets_hint=resets_of(tail)))
     return tuple(windows)
 
 

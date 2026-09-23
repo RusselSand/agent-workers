@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .base.guard import LimitPolicy
@@ -72,7 +72,7 @@ class Settings:
     def override(self, **named: str | None) -> Settings:
         """Флаги команды сильнее всего остального; пустые значения ничего не меняют."""
         given = {f"AGENT_{key.upper()}": value for key, value in named.items() if value}
-        return replace(self, overrides={**self.overrides, **given})
+        return Settings(self.values, self.path, {**self.overrides, **given})
 
     def get(self, key: str, default: str = "") -> str:
         """Пустое значение задано намеренно: `AGENT_REFUSE_ABOVE=` снимает порог."""
