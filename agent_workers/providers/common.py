@@ -33,6 +33,9 @@ def find_executable(explicit: str | None, variable: str, *names: str) -> str:
         found = found or shutil.which(name)
     if not found or not Path(found).is_file():
         raise RuntimeError(f"CLI не найдена: {' / '.join(names)}")
+    if os.name != "nt" and not os.access(found, os.X_OK):
+        # Файл есть, но запустить его нельзя: лучше сказать сразу, чем упасть на входе.
+        raise RuntimeError(f"CLI не запускается — нет права на выполнение: {found}")
     # Абсолютный путь: подпроцессы стартуют из разных каталогов, и относительный
     # путь вроде ./bin/claude там уже никуда не ведёт.
     return str(Path(found).resolve())

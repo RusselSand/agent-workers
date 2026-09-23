@@ -249,6 +249,23 @@ def test_empty_reply_is_explained_with_the_cli_diagnostic():
     assert cli.explain({"reason": None, "reply": None}) == "ход не дал ответа"
 
 
+def test_cli_that_cannot_start_is_a_message_not_a_traceback(monkeypatch, capsys):
+    from agent_workers.base import worker as worker_module
+    from agent_workers.base.process import LaunchError
+
+    def cannot_start(self, request, **kwargs):
+        raise LaunchError("CLI не запустилась: [Errno 13] Permission denied")
+
+    monkeypatch.setattr(worker_module.Worker, "run", cannot_start)
+    monkeypatch.setattr(worker_module.Worker, "login",
+                        lambda self: (_ for _ in ()).throw(PermissionError("нет прав")))
+    for command in (["run", "привет"], ["login"]):
+        assert cli.main(command) == 2
+        err = capsys.readouterr().err
+        assert "не запустилась" in err
+        assert "Traceback" not in err
+
+
 def test_invalid_request_is_a_concise_message_not_a_traceback(monkeypatch, capsys):
     from agent_workers.base import worker as worker_module
 

@@ -15,6 +15,8 @@ log = logging.getLogger(__name__)
 # Некоторые CLI считают время сброса от момента ответа: микросекунды двух замеров
 # разные. Настоящий сброс сдвигает его на целое окно — часы и дни, а не доли секунды.
 JITTER = timedelta(minutes=1)
+# Дольше ждать учёта расхода незачем: ответ уже готов, а замер — справка.
+MAX_SETTLE = 60.0
 
 
 @dataclass
@@ -36,6 +38,11 @@ class LimitPolicy:
         limit = self.refuse_above
         if limit is not None and (isinstance(limit, bool) or not 0 <= limit <= 100):
             raise ValueError(f"Порог отказа — процент от 0 до 100 или None: {limit!r}")
+        # Пауза нужна уже после оплаченного хода: сорвись time.sleep там — и вызывающий
+        # получил бы исключение вместо готового ответа. Проверяем заранее.
+        if not 0 <= self.settle_delay <= MAX_SETTLE:
+            raise ValueError(f"Пауза перед замером «после» — от 0 до {MAX_SETTLE} с: "
+                             f"{self.settle_delay!r}")
 
 
 @dataclass

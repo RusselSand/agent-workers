@@ -252,10 +252,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     destination(worker, settings)
-    if options.command == "login":
-        return worker.login()
-    if options.command == "logout":
-        return worker.logout()
-    if options.command == "status":
-        return status(worker)
-    return run(worker, options)
+    try:
+        if options.command == "login":
+            return worker.login()
+        if options.command == "logout":
+            return worker.logout()
+        if options.command == "status":
+            return status(worker)
+        return run(worker, options)
+    except OSError as exc:
+        # CLI есть в настройках, но не запускается: снесли, отобрали права, нет процессов.
+        print(f"CLI не запустилась: {exc}", file=sys.stderr)
+        return 2

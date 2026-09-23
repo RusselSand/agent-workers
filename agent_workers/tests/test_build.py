@@ -48,6 +48,7 @@ def test_cli_path_comes_from_the_env_file_too(tmp_path, monkeypatch):
         monkeypatch.delenv(name, raising=False)
     (tmp_path / "bin").mkdir()
     (tmp_path / "bin" / "codex").write_text("", encoding="utf-8")
+    (tmp_path / "bin" / "codex").chmod(0o755)           # заглушка, но запускаемая
     (tmp_path / ".env").write_text(f"AGENT_PROVIDER=codex\n"
                                    f"AGENT_HOME={(tmp_path / 'учётка').as_posix()}\n"
                                    f"AGENT_CODEX_BINARY=bin/codex\n", encoding="utf-8")
@@ -56,6 +57,18 @@ def test_cli_path_comes_from_the_env_file_too(tmp_path, monkeypatch):
     monkeypatch.chdir(nested)
     worker = build(Settings.load())
     assert Path(worker.adapter.executable) == (tmp_path / "bin" / "codex").resolve()
+
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="права на выполнение — POSIX")
+def test_cli_without_execute_permission_is_refused_at_build(tmp_path, monkeypatch):
+    """Файл есть, запустить нельзя: сказать при сборке, а не упасть на входе."""
+    placeholder = tmp_path / "codex"
+    placeholder.write_text("", encoding="utf-8")
+    placeholder.chmod(0o644)
+    monkeypatch.setenv("AGENT_CODEX_BINARY", str(placeholder))
+    settings = settings_at(tmp_path, "AGENT_PROVIDER=codex")
+    with pytest.raises(RuntimeError, match="права на выполнение"):
+        build(settings)
 
 
 def test_unknown_provider_is_named_not_guessed(tmp_path):

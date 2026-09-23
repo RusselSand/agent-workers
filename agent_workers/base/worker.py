@@ -76,23 +76,9 @@ class Worker:
         """
         model = str(request.get("model") or getattr(self.adapter, "model", "") or "")
         try:
-            if ensure_login:
-                # Готовый ответ выше отдан без входа; проверяем его, только когда ход нужен.
-                try:
-                    self.check()
-                except Exception as exc:
-                    raise RuntimeError(f"вход не подтверждён: {exc}") from exc
-            before = self.guard.measure("before", model=model)
-            # Выключенный замер — это решение вызывающего, а не неизвестный лимит.
-            reason = self.guard.blocked(before) if self.policy.before else None
-            if reason:
-                self.discard(entry)   # ход не начинался — папке незачем оставаться
-                return self.result("limit_reached", entry, None, before, None, reason=reason)
-            if stop is not None and stop():
-                # Остановку попросили, пока шли проверки: платный ход не начинаем.
-                self.discard(entry)
-                return self.result("aborted", entry, None, before, None,
-                                   reason="остановка запрошена до запуска")
+            refusal, before = self.preflight(entry, model, stop=stop, ensure_login=ensure_login)
+            if refusal is not None:
+                return refusal
             entry.reset()
             command = self.adapter.ask(entry, request, self.profile)
         except BaseException:
@@ -134,6 +120,41 @@ class Worker:
             return self.result(state, entry, reply, before, None)
         after = self.guard.measure("after", session=reply.session_id, model=model)
         return self.result(state, entry, reply, before, after)
+
+    def preflight(self, entry: Entry, model: str, *, stop=None,
+                  ensure_login: bool = False) -> tuple[dict | None, object]:
+        """Проверки до хода: вход и лимит. Вернёт (отказ, замер) или (None, замер «до»).
+
+        Остановку смотрим перед каждой пробой, а не только в конце: проба входа и замер
+        лимита занимают до минут, и начинать их, когда пора выходить, незачем.
+        """
+        stopping = stop or (lambda: False)
+
+        def aborted(before=None) -> dict:
+            # Остановку попросили до запуска: платный ход не начинаем, папка не нужна.
+            self.discard(entry)
+            return self.result("aborted", entry, None, before, None,
+                               reason="остановка запрошена до запуска")
+
+        if stopping():
+            return aborted(), None
+        if ensure_login:
+            # Готовый ответ выше отдан без входа; проверяем его, только когда ход нужен.
+            try:
+                self.check()
+            except Exception as exc:
+                raise RuntimeError(f"вход не подтверждён: {exc}") from exc
+            if stopping():
+                return aborted(), None
+        before = self.guard.measure("before", model=model)
+        # Выключенный замер — это решение вызывающего, а не неизвестный лимит.
+        reason = self.guard.blocked(before) if self.policy.before else None
+        if reason:
+            self.discard(entry)   # ход не начинался — папке незачем оставаться
+            return self.result("limit_reached", entry, None, before, None, reason=reason), before
+        if stopping():
+            return aborted(before), before
+        return None, before
 
     def parse(self, entry: Entry) -> Reply:
         """Разбор журналов. Сбой разбора — это незавершённый ход, а не падение воркера:

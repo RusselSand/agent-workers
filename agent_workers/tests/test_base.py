@@ -705,6 +705,29 @@ def test_no_measurement_after_a_requested_stop(tmp_path, profile):
     assert adapter.reads == 1
 
 
+def test_stop_before_preflight_skips_the_probes(tmp_path, profile):
+    """Пора выходить ещё до проверок: ни пробы входа, ни замера лимита — они долгие."""
+    class Watched(FakeAdapter):
+        checks = 0
+
+        def verify(self, captured):
+            Watched.checks += 1
+
+    adapter = Watched(tmp_path)
+    result = worker_at(tmp_path, profile, adapter).run({"user": "ок"}, key="задача",
+                                                       stop=lambda: True, ensure_login=True)
+    assert result["state"] == "aborted"
+    assert Watched.checks == 0
+    assert adapter.reads == 0
+
+
+@pytest.mark.parametrize("delay", [-1.0, float("nan"), float("inf")])
+def test_settle_delay_is_checked_before_any_turn(delay):
+    """Иначе time.sleep сорвался бы уже после оплаченного хода и унёс готовый ответ."""
+    with pytest.raises(ValueError, match="Пауза"):
+        LimitPolicy(settle_delay=delay)
+
+
 def test_no_measurement_after_when_stop_comes_right_after_the_turn(tmp_path, profile,
                                                                    monkeypatch):
     """CLI вышла сама, и тут же попросили остановиться: ответ в папке, замер не ждём."""
@@ -762,6 +785,7 @@ def test_relative_executable_becomes_absolute(tmp_path, monkeypatch):
 
     (tmp_path / "bin").mkdir()
     (tmp_path / "bin" / "claude").write_text("", encoding="utf-8")
+    (tmp_path / "bin" / "claude").chmod(0o755)          # заглушка, но запускаемая
     monkeypatch.chdir(tmp_path)
     found = common.find_executable("./bin/claude", "AGENT_CLAUDE_BINARY", "claude")
     assert Path(found).is_absolute()
