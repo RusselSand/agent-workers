@@ -86,13 +86,26 @@ def collect(outbox: Outbox, options) -> int:
     return 0
 
 
-def run(worker: Worker, options) -> int:
-    """Один ход: задание -> ответ, с расходом подписки и оценкой стоимости."""
+def request_of(worker: Worker, options) -> dict:
+    """Запрос из аргументов команды. Путь к инструкции назвал человек: опечатка в нём —
+    не повод для трассировки, поэтому ошибка чтения становится отказом в запросе."""
     text = sys.stdin.read() if options.prompt == "-" else options.prompt
     request = {"user": text, "model": worker.adapter.model}
     if options.system_file:
-        request["system"] = Path(options.system_file).read_text(encoding="utf-8")
+        try:
+            request["system"] = Path(options.system_file).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ValueError(f"не прочитать файл инструкции: {exc}") from None
+    return request
 
+
+def run(worker: Worker, options) -> int:
+    """Один ход: задание -> ответ, с расходом подписки и оценкой стоимости."""
+    try:
+        request = request_of(worker, options)
+    except ValueError as exc:
+        print(f"запрос отклонён: {exc}", file=sys.stderr)
+        return 2
     if options.dry_run:
         return dry_run(worker, request)
     try:

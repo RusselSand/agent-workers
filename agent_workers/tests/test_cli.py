@@ -56,6 +56,16 @@ def test_system_file_reaches_the_request(tmp_path, capsys):
     assert written.read_text(encoding="utf-8") == "Отвечай коротко"
 
 
+def test_unreadable_system_file_is_a_message_not_a_traceback(tmp_path, capsys):
+    assert cli.main(["run", "--system-file", str(tmp_path / "нет-такого.md"), "привет"]) == 2
+    assert "файл инструкции" in capsys.readouterr().err
+
+    broken = tmp_path / "не-utf8.md"
+    broken.write_bytes(b"\xff\xfe\x00")
+    assert cli.main(["run", "--system-file", str(broken), "--dry-run", "привет"]) == 2
+    assert "файл инструкции" in capsys.readouterr().err
+
+
 def test_prompt_can_come_from_stdin(monkeypatch, capsys):
     monkeypatch.setattr(sys, "stdin", io.StringIO("задание из файла"))
     cli.main(["run", "--dry-run", "-"])
