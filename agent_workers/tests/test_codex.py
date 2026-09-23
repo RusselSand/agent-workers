@@ -36,6 +36,26 @@ def test_quota_is_read_from_the_bucket_of_our_model(sample):
     assert credits_of(result["rateLimits"]) == Decimal("184.5226000000")
 
 
+def test_credits_come_from_the_same_bucket_as_the_windows(sample, profile, monkeypatch):
+    """Остаток общей корзины не платит за корзину модели, у которой кредитов нет."""
+    from agent_workers.base import Guard, LimitPolicy
+
+    result = json.loads(sample("codex-app-server.json"))
+    # Корзина Luna выбрана целиком, у общей корзины — остаток кредитов.
+    result["rateLimitsByLimitId"]["base_model_inference"]["primary"]["usedPercent"] = 100
+    monkeypatch.setattr(CodexAdapter, "rate_limits", lambda self, profile: result)
+    guard = Guard(adapter(), profile, LimitPolicy())
+
+    luna = adapter().limits(profile, model="gpt-5.6-luna")
+    assert luna.credits is None
+    assert not luna.spendable
+    assert guard.blocked(luna) == "Окно выбрано на 100%"       # кредиты чужой корзины не в счёт
+
+    sol = adapter().limits(profile, model="gpt-5.6-sol")
+    assert sol.credits == Decimal("184.5226000000")
+    assert guard.blocked(sol) is None                         # у общей корзины кредиты свои
+
+
 def test_single_bucket_answer_is_supported(sample):
     result = json.loads(sample("codex-app-server.json"))
     result.pop("rateLimitsByLimitId")

@@ -82,14 +82,32 @@ def applicable(buckets: Mapping, model: str) -> dict:
     return general or dict(buckets)
 
 
-def rpc_windows(result: Mapping, model: str = "") -> tuple[Window, ...]:
+def buckets_of(result: Mapping) -> dict:
+    """Корзины лимитов из ответа app-server; старый ответ несёт одну, без словаря."""
     buckets = result.get("rateLimitsByLimitId")
-    if not isinstance(buckets, dict) or not buckets:
-        single = result.get("rateLimits")
-        buckets = ({str(single.get("limitId") or "codex"): single}
-                   if isinstance(single, dict) else {})
-    return tuple(bucket_windows(applicable(buckets, model), used="usedPercent",
+    if isinstance(buckets, dict) and buckets:
+        return buckets
+    single = result.get("rateLimits")
+    return {str(single.get("limitId") or "codex"): single} if isinstance(single, dict) else {}
+
+
+def rpc_windows(result: Mapping, model: str = "") -> tuple[Window, ...]:
+    return tuple(bucket_windows(applicable(buckets_of(result), model), used="usedPercent",
                                 duration="windowDurationMins", resets="resetsAt"))
+
+
+def rpc_credits(result: Mapping, model: str = "") -> tuple[Decimal | None, bool]:
+    """Кредиты тех же корзин, по которым считаются окна, — остаток и «без ограничений».
+
+    Кредиты сообщаются по корзинам: остаток общей не платит за корзину модели, у которой
+    своих нет. Корзина без кредитов — значит, их нет: тратить без уверенности нельзя.
+    """
+    selected = list(applicable(buckets_of(result), model).values())
+    balances = [credits_of(bucket) for bucket in selected]
+    endless = bool(selected) and all(unlimited(bucket) for bucket in selected)
+    if not balances or None in balances:
+        return None, endless
+    return min(balances), endless
 
 
 def rollouts(home: Path):
@@ -255,10 +273,10 @@ class CodexAdapter:
         windows = rpc_windows(result, model)
         if not windows:
             return self.snapshot(profile, session=session)
+        credits, endless = rpc_credits(result, model)
         summary = result.get("rateLimits") or {}
         return Limits(self.name, profile.name, windows, datetime.now(UTC), "app-server", True,
-                      plan=summary.get("planType"), credits=credits_of(summary),
-                      credits_unlimited=unlimited(summary))
+                      plan=summary.get("planType"), credits=credits, credits_unlimited=endless)
 
     def rate_limits(self, profile: Profile) -> dict:
         """Три запроса подряд и ни одного хода модели: этот процесс не умеет её звать."""
