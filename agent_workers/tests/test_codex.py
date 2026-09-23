@@ -1,8 +1,11 @@
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from agent_workers.base import Entry
+import pytest
+
+from agent_workers.base import Entry, Profile
 from agent_workers.providers.codex import (
     CodexAdapter,
     credits_of,
@@ -153,6 +156,17 @@ def test_proxy_and_certificates_reach_the_subprocess(monkeypatch, profile):
     assert env["HTTPS_PROXY"] == "http://proxy.local:3128"
     assert env["NODE_EXTRA_CA_CERTS"] == "/etc/ssl/corp.pem"
     assert "AGENT_SECRET" not in env and env["CODEX_HOME"] == str(profile.home)
+
+
+def test_account_folder_is_created_private(tmp_path):
+    """Там токены входа: соседу по машине туда незачем."""
+    from agent_workers.providers import common
+
+    if os.name == "nt":
+        pytest.skip("на Windows права выставляются иначе")
+    profile = Profile("x", tmp_path / "учётка")
+    common.environment(profile, "CODEX_HOME")
+    assert profile.home.stat().st_mode & 0o077 == 0
 
 
 def test_unlimited_credits_without_a_balance_are_still_credits(sample, profile):

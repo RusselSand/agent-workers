@@ -179,6 +179,25 @@ def test_collect_says_no_to_a_dangerous_key(capsys):
     assert "ключ" in capsys.readouterr().err
 
 
+def test_collect_all_spares_the_account_when_runs_point_at_it(tmp_path, monkeypatch, capsys):
+    """AGENT_RUNS по ошибке равен AGENT_HOME: токены и сессии CLI не должны пропасть."""
+    from agent_workers.base import Entry
+
+    home = tmp_path / "учётка"
+    monkeypatch.setenv("AGENT_RUNS", str(home))
+    (home / "sessions").mkdir(parents=True)
+    (home / ".credentials.json").write_text("токен", encoding="utf-8")
+    (home / "sessions" / "rollout.jsonl").write_text("{}", encoding="utf-8")
+    entry = Entry(home, "ключ-хода")
+    entry.update(state="answered")
+
+    assert cli.main(["collect", "--all"]) == 0
+    assert "забрано: 1" in capsys.readouterr().out
+    assert not entry.folder.exists()
+    assert (home / "sessions" / "rollout.jsonl").exists()
+    assert (home / ".credentials.json").exists()
+
+
 def test_collect_all_skips_what_is_busy(tmp_path, capsys):
     from agent_workers.base import Entry
 

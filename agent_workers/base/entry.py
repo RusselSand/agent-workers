@@ -67,6 +67,16 @@ class NotRemoved(RuntimeError):
 
 
 LOCK = "owner.lock"
+STATE = "state.json"
+
+
+def is_entry(folder: Path) -> bool:
+    """Папку хода узнаём по её файлам: замок заводится первым делом, при захвате.
+
+    Чужие каталоги рядом — например, если каталог ходов по ошибке совпал с каталогом
+    учётной записи, — ходами не считаются, и `collect` их не снесёт вместе с токенами.
+    """
+    return (folder / LOCK).is_file() or (folder / STATE).is_file()
 
 
 def folder_for(root: Path, key: str) -> Path:
@@ -89,7 +99,7 @@ def folder_for(root: Path, key: str) -> Path:
 class Entry:
     def __init__(self, root: Path, key: str) -> None:
         self.folder = folder_for(root, key)
-        self.state_path = self.folder / "state.json"
+        self.state_path = self.folder / STATE
         self.lock = None
 
     @property

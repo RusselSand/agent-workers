@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .contract import Adapter, Profile, Reply
-from .entry import Entry
+from .entry import Entry, private_dir
 from .guard import Guard, LimitPolicy
 from .outbox import Outbox
 from .process import capture, interactive, supervise
@@ -44,7 +44,7 @@ class Worker:
         self.adapter.verify(capture(self.adapter.check(self.profile)))
 
     def login(self) -> int:
-        self.profile.home.mkdir(parents=True, exist_ok=True)
+        private_dir(self.profile.home)   # сюда лягут токены входа
         return interactive(self.adapter.login(self.profile))
 
     def logout(self) -> int:

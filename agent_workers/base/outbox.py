@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .entry import Busy, Entry, folder_for
+from .entry import Busy, Entry, folder_for, is_entry
 
 
 @dataclass
@@ -21,7 +21,7 @@ class Outbox:
         if not self.root.is_dir():
             return []
         return [Entry(self.root, path.name) for path in sorted(self.root.iterdir())
-                if path.is_dir()]
+                if path.is_dir() and is_entry(path)]
 
     def pending(self) -> list[Entry]:
         """Всё, чем никто не занят: готовые ответы и следы оборванных ходов.
@@ -39,7 +39,7 @@ class Outbox:
         """
         if isinstance(entry, str):
             folder = folder_for(self.root, entry)   # ключ приходит снаружи, его проверяют
-            if not folder.is_dir():
+            if not folder.is_dir() or not is_entry(folder):
                 raise ValueError(f"Хода с таким ключом нет: {entry}")
             entry = Entry(self.root, folder.name)
         if not entry.claim():

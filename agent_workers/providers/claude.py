@@ -180,6 +180,27 @@ def canonical(usage: Mapping) -> str | None:
     return None
 
 
+def read_stream(text: str) -> tuple[list[str], dict | None, str | None]:
+    """Текст ответа по частям, итоговое событие и сессия — из журнала stream-json."""
+    streamed, terminal, session = [], None, None
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue  # Обрезанный хвост остаётся в журнале как есть.
+        if not isinstance(item, dict) or item.get("parent_tool_use_id"):
+            continue
+        session = item.get("session_id") or session
+        if item.get("type") == "result":
+            terminal = item
+        elif item.get("type") == "assistant":
+            streamed += [part.get("text", "") for part in item["message"].get("content", [])
+                         if isinstance(part, dict) and part.get("type") == "text"]
+    return streamed, terminal, session
+
+
 def terminal_usage(terminal: Mapping) -> dict:
     return {**(terminal.get("usage") or {}),
             "total_cost_usd": terminal.get("total_cost_usd"),
@@ -236,22 +257,7 @@ class ClaudeAdapter:
         return Command(argv, self.environment(profile), entry.folder, stdin)
 
     def reply(self, entry, profile: Profile) -> Reply:
-        streamed, terminal, session = [], None, None
-        for line in entry.read("stdout.jsonl").splitlines():
-            if not line.strip():
-                continue
-            try:
-                item = json.loads(line)
-            except ValueError:
-                continue  # Обрезанный хвост остаётся в журнале как есть.
-            if not isinstance(item, dict) or item.get("parent_tool_use_id"):
-                continue
-            session = item.get("session_id") or session
-            if item.get("type") == "result":
-                terminal = item
-            elif item.get("type") == "assistant":
-                streamed += [part.get("text", "") for part in item["message"].get("content", [])
-                             if isinstance(part, dict) and part.get("type") == "text"]
+        streamed, terminal, session = read_stream(entry.read("stdout.jsonl"))
         model = entry.meta.get("model")
         if terminal is None:
             return Reply("".join(streamed), session, False, "no_terminal_result", {}, model=model)
@@ -262,6 +268,10 @@ class ClaudeAdapter:
             # Ошибка тоже оплачена: токены и её текст должны дойти до вызывающего.
             return Reply("".join(streamed), session, False, "cli_error: " + (text or "без текста"),
                          usage, tokens_of(usage), model)
+        text = text or "".join(streamed)
+        if not text:
+            # Успех без текста — не ответ: иначе координатор получил бы пустой DONE.
+            return Reply("", session, False, "empty_result", usage, tokens_of(usage), model)
         return Reply(text, session, True, None, usage, tokens_of(usage), model)
 
     def price(self, reply: Reply) -> Cost | None:

@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from ..base.contract import Cost, Profile, Rates, Reply
+from ..base.entry import private_dir
 from ..base.pricing import estimate
 
 # Ключи проекта в подпроцесс не уезжают: пропускаем то, без чего CLI не живёт,
@@ -38,7 +39,7 @@ def find_executable(explicit: str | None, variable: str, *names: str) -> str:
 
 
 def environment(profile: Profile, home_variable: str, extra: set[str] = frozenset()) -> dict:
-    profile.home.mkdir(parents=True, exist_ok=True)
+    private_dir(profile.home)   # там токены входа: соседу по машине туда незачем
     allowed = ALLOWED | extra
     base = {key: value for key, value in os.environ.items() if key.upper() in allowed}
     return {**base, home_variable: str(profile.home)}

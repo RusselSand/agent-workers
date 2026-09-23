@@ -116,6 +116,23 @@ def test_error_result_keeps_its_text_and_paid_tokens(profile, tmp_path):
     assert reply.tokens.input == 500 and reply.usage["total_cost_usd"] == 0.0025
 
 
+def test_successful_turn_without_text_is_not_an_answer(profile, tmp_path):
+    """Иначе координатор получил бы пустой ответ как выполненную задачу."""
+    empty = {"type": "result", "is_error": False, "result": "", "session_id": "s",
+             "usage": {"input_tokens": 5, "output_tokens": 0}}
+    entry = Entry(tmp_path, "run")
+    entry.write("stdout.jsonl", json.dumps(empty))
+    reply = adapter().reply(entry, profile)
+    assert reply.complete is False
+    assert reply.diagnostic == "empty_result"
+
+    # Текст пришёл сообщениями, а итог его не повторил — ответ берём из потока.
+    streamed = {"type": "assistant", "message": {"content": [{"type": "text", "text": "ок"}]}}
+    entry.write("stdout.jsonl", json.dumps(streamed) + "\n" + json.dumps(empty))
+    reply = adapter().reply(entry, profile)
+    assert (reply.text, reply.complete) == ("ок", True)
+
+
 def test_missing_system_prompt_is_empty_not_the_word_none(profile, tmp_path):
     entry = Entry(tmp_path, "run")
     adapter().ask(entry, {"user": "привет", "system": None}, profile)

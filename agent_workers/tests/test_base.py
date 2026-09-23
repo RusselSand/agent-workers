@@ -352,13 +352,28 @@ def test_abandoned_folder_is_visible_and_collectable(tmp_path, profile):
     crashed.write("stdout.jsonl", "")
     crashed.update(state="running")
     half = Entry(tmp_path / "runs", "упал-до-состояния")
+    half.claim()                                   # замок заводится первым делом
     half.write("invocation/input.txt", "задание")
+    half.release()
 
     waiting = {entry.folder.name: entry.outcome for entry in worker.pending()}
     assert waiting == {"упал-посреди-хода": "incomplete", "упал-до-состояния": "incomplete"}
     for entry in worker.pending():
         worker.collect(entry)
     assert not any((tmp_path / "runs").iterdir())
+
+
+def test_foreign_directories_are_never_taken_for_entries(tmp_path, profile):
+    """Каталог ходов по ошибке совпал с каталогом учётки: её содержимое — не ходы."""
+    worker = worker_at(tmp_path, profile)
+    sessions = tmp_path / "runs" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "токен.json").write_text("секрет", encoding="utf-8")
+
+    assert worker.pending() == []
+    with pytest.raises(ValueError, match="нет"):
+        worker.collect("sessions")
+    assert (sessions / "токен.json").exists()
 
 
 def test_broken_reply_parsing_is_an_incomplete_result_not_a_crash(tmp_path, profile):
