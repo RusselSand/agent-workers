@@ -4,32 +4,27 @@
 адаптером. Менять этот файл придётся, только если поменяется сама схема работы —
 например, ход перестанет быть «один процесс, один ответ».
 
-Папка хода переживает перезапуски, поэтому порядок такой: сначала разбираемся, что
-в ней уже лежит, и только потом тратим лимит. Готовый ответ отдаётся даром, чужой
-живой процесс не трогается, а оборванная попытка не выдаёт себя за идущую.
+Ключ хода — идентификатор задачи от координатора. Уникальность задачи, аренда и
+решение о повторе — его забота. Воркер отвечает за одно: оплаченный ответ не
+теряется, пока его не забрали. Поэтому порядок такой: сначала смотрим, нет ли в
+папке готового ответа, и только потом тратим лимит.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import time
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .contract import Adapter, Profile, Reply
-from .entry import Entry, atomic_write, digest, guarded, hold, let_go, registry
+from .entry import Entry
 from .guard import Guard, LimitPolicy
 from .outbox import Outbox
 from .process import capture, interactive, supervise
 
 log = logging.getLogger(__name__)
-
-UNFINISHED = ("prepared", "reserved", "running", "captured")
-# Windows не даёт подменить файл, пока его кто-то читает, и наоборот: короткие повторы
-# на суммарную секунду с запасом перекрывают такое окно.
-RETRY_PAUSES = (0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.3)
 
 
 @dataclass
@@ -39,7 +34,6 @@ class Worker:
     root: Path
     policy: LimitPolicy = field(default_factory=LimitPolicy)
     timeout: float = 1200
-    max_pending: int = 50     # столько готовых и не забранных результатов терпим
 
     def __post_init__(self) -> None:
         self.guard = Guard(self.adapter, self.profile, self.policy)
@@ -56,173 +50,68 @@ class Worker:
     def logout(self) -> int:
         return interactive(self.adapter.logout(self.profile))
 
-    def run(self, request: Mapping[str, object], *, key: str | None = None,
-            pulse=None, stop=None, retry: bool = False, ensure_login: bool = False) -> dict:
-        entry = Entry(self.root, key or self.key_for(request))
+    def run(self, request: Mapping[str, object], *, key: str,
+            pulse=None, stop=None, ensure_login: bool = False) -> dict:
+        entry = Entry(self.root, key)
         if not entry.claim():
-            # Папкой владеет живой процесс. Ни повторять, ни двигать его журналы нельзя:
-            # иначе второй вызов оплатит ту же работу, а состояние напишут оба сразу.
+            # Папкой владеет живой процесс: второй вызов оплатил бы ту же работу.
             return self.result("in_progress", entry, None, None, None,
                                reason="ход уже выполняется другим процессом")
-        conversation = None
         try:
-            if not retry:
-                # Готовый ответ не трогает беседу — отдаём его, не дожидаясь её очереди.
-                done = self.finished(entry)
-                if done is not None:
-                    return done
-            session = request.get("session")
-            if session:
-                # Продолжения одной беседы идут по очереди: два --resume разом читали бы
-                # и дописывали одну и ту же историю наперегонки.
-                conversation = hold(self.session_file(session, "lock"))
-                if conversation is None:
-                    if not entry.state_path.exists():
-                        # Папку завели зря: без состояния её не увидит ни лоток, ни уборка.
-                        self.discard(entry)
-                    return self.result("in_progress", entry, None, None, None,
-                                       reason="эту беседу сейчас продолжает другой ход")
-            return self.attempt(entry, request, pulse=pulse, stop=stop, retry=retry,
-                                ensure_login=ensure_login)
-        finally:
-            let_go(conversation)
-            entry.release()
-
-    def session_file(self, session: object, suffix: str) -> Path:
-        return self.root / ".sessions" / f"{digest(str(session))}.{suffix}"
-
-    def generation(self, session: object) -> int:
-        """Сколько ходов этой беседы прошло через нас. Часть ключа хода."""
-        path = self.session_file(session, "gen")
-        for pause in RETRY_PAUSES:
-            try:
-                return int(path.read_text(encoding="utf-8"))
-            except FileNotFoundError:
-                return 0
-            except (OSError, ValueError):
-                time.sleep(pause)   # подмена файла в этот самый миг: подождать, не нуль
-        # Нуль здесь означал бы «беседа не начиналась» и вернул бы старый ответ из лотка.
-        raise OSError(f"Номер беседы не прочитать: {path}")
-
-    def advance(self, session: object, to: int) -> None:
-        """Продвинуть беседу не меньше чем до `to`. Повторный вызов ничего не портит.
-
-        Сравнение и запись — под собственным коротким замком: восстановление из папки
-        идёт вне очереди беседы и иначе могло бы откатить номер, записанный позже.
-        """
-        with guarded(self.session_file(session, "gen.lock")):
-            if self.generation(session) >= to:
-                return
-            # Подмена целиком: читатель без замка не увидит усечённый файл и нуль.
-            atomic_write(self.session_file(session, "gen"), str(to))
-
-    def settle(self, entry: Entry) -> None:
-        """Ответ получен — беседа продвинулась. Номер записан в самой папке, поэтому
-        если процесс умер между ответом и продвижением, следующее чтение доделает."""
-        meta = entry.meta
-        if meta.get("session") and isinstance(meta.get("advances"), int):
-            self.advance(meta["session"], meta["advances"])
-
-    def attempt(self, entry: Entry, request: Mapping[str, object], *,
-                pulse=None, stop=None, retry: bool = False, ensure_login: bool = False) -> dict:
-        if not retry:
             done = self.finished(entry)
             if done is not None:
                 return done
-            if entry.attempted:
-                # Маркер стоит, а владельца нет: это итог прошлой попытки, а не работа.
-                return self.taken(entry)
-        # Свежая папка — та, в которой ещё не было платного хода. Судим по записи, а не
-        # по флагу retry: повтор по ключу без прошлой попытки — обычный первый ход.
-        fresh = not entry.attempted
-        if ensure_login:
-            # Готовый ответ выше отдан без входа; проверяем его, только когда ход нужен.
-            try:
-                self.check()
-            except Exception as exc:
-                if fresh:
-                    self.discard(entry)   # папку завели зря: без состояния её никто не найдёт
-                raise RuntimeError(f"вход не подтверждён: {exc}") from exc
+            return self.attempt(entry, request, pulse=pulse, stop=stop,
+                                ensure_login=ensure_login)
+        finally:
+            entry.release()
+
+    def attempt(self, entry: Entry, request: Mapping[str, object], *,
+                pulse=None, stop=None, ensure_login: bool = False) -> dict:
+        """Готового ответа в папке нет — ход делается заново.
+
+        Что бы там ни лежало — ничего или след оборванной попытки, — задачу выдали
+        снова, значит, повтор нужен. Сколько раз повторять, считает координатор.
+        """
         model = str(request.get("model") or getattr(self.adapter, "model", "") or "")
-        # У повтора папка уже занята прежним результатом: ни брони, ни уборки — пока
-        # все проверки не пройдены, старую попытку не трогаем, чтобы отказ её не стёр.
-
-        with registry(self.root):
-            # Считаем и занимаем место разом: иначе несколько процессов, глядя на один
-            # и тот же лоток, стартуют одновременно и перевалят за предел.
-            occupied = self.outbox.occupied(besides=entry.folder.name)
-            if occupied >= self.max_pending:
-                # Лучше встать, чем молча забивать диск текстами, которые не забирают.
-                broken = self.result("outbox_full", entry, None, None, None,
-                                     reason=f"мест занято: {occupied}")
-            else:
-                if fresh:
-                    # Бронь, а не запуск: если нас убьют до старта CLI, никто не примет
-                    # пустую папку за оборванный ход — её просто выполнят заново.
-                    entry.update(state="reserved")
-                broken = None
-        if broken is not None:
-            if fresh:
-                self.discard(entry)
-            return broken
-
-        before = self.guard.measure("before", model=model)
-        # Выключенный замер — это решение вызывающего, а не неизвестный лимит.
-        reason = self.guard.blocked(before) if self.policy.before else None
-        if reason:
-            if fresh:
-                self.discard(entry)   # в папке ничего нет: ход не начинался
-            return self.result("limit_reached", entry, None, before, None, reason=reason)
-
-        if stop is not None and stop():
-            # Остановку попросили, пока шли проверки: платный ход не начинаем.
-            if fresh:
-                self.discard(entry)
-            return self.result("aborted", entry, None, before, None,
-                               reason="остановка запрошена до запуска")
-
-        if retry and not fresh:
-            entry.restart()   # проверки пройдены — теперь прежнюю попытку можно отодвинуть
         try:
+            if ensure_login:
+                # Готовый ответ выше отдан без входа; проверяем его, только когда ход нужен.
+                try:
+                    self.check()
+                except Exception as exc:
+                    raise RuntimeError(f"вход не подтверждён: {exc}") from exc
+            before = self.guard.measure("before", model=model)
+            # Выключенный замер — это решение вызывающего, а не неизвестный лимит.
+            reason = self.guard.blocked(before) if self.policy.before else None
+            if reason:
+                self.discard(entry)   # ход не начинался — папке незачем оставаться
+                return self.result("limit_reached", entry, None, before, None, reason=reason)
+            if stop is not None and stop():
+                # Остановку попросили, пока шли проверки: платный ход не начинаем.
+                self.discard(entry)
+                return self.result("aborted", entry, None, before, None,
+                                   reason="остановка запрошена до запуска")
+            entry.reset()
             command = self.adapter.ask(entry, request, self.profile)
         except BaseException:
-            if fresh:
-                # Место уже занято, а хода не будет — включая Ctrl+C в этот момент:
-                # иначе кривые задания и обрывы тихо забьют лоток.
-                self.discard(entry)
-            else:
-                # Повтор не дошёл до запуска: прежний результат возвращается на место,
-                # как будто повтора и не просили, — он всё ещё доставляем.
-                entry.rollback()
+            # Отказ до запуска — включая Ctrl+C в этот момент: ход не стоил ничего,
+            # и папка без хода никому не нужна.
+            self.discard(entry)
             raise
-        session = request.get("session")
-        if session:
-            # Продвижение беседы записываем в саму папку ещё до запуска: тогда ответ и
-            # его следствие для беседы неразделимы, что бы ни случилось с процессом.
-            entry.update(session=str(session), advances=self.generation(session) + 1)
-        entry.mark_started()   # CLI сейчас запустится: с этого места ход уже стоил денег
-        entry.update(state="running", pid=os.getpid())
+        entry.update(state="running", pid=os.getpid())   # с этого места ход стоит денег
         try:
             outcome = supervise(command, stdout=entry.stdout, stderr=entry.stderr,
                                 pulse=pulse, stop=stop, timeout=self.timeout)
         except BaseException as exc:
-            # Ctrl+C: папка обязана стать «незавершённой», а не зависнуть в «идёт» —
-            # иначе она занимает место в лотке, а забрать её нельзя.
+            # Ctrl+C: папка обязана стать «незавершённой», а не зависнуть в «идёт».
             entry.update(state="incomplete", pid=None, diagnostic=type(exc).__name__)
             raise
         entry.update(state="captured", pid=None, returncode=outcome.returncode,
                      interruption=outcome.interruption)
         reply = self.parse(entry)
         state = "answered" if reply.complete else "incomplete"
-        entry.update(state=state, session_id=reply.session_id, diagnostic=reply.diagnostic)
-        if state == "answered":
-            self.settle(entry)
-            if not session and reply.session_id:
-                # Первый ход завёл беседу. Запоминаем, на каком её номере он родился:
-                # когда беседа уйдёт дальше, его идентификатор уже нельзя отдавать как
-                # «продолжай отсюда» — там будут и чужие ходы.
-                entry.update(born=reply.session_id,
-                             born_generation=self.generation(reply.session_id))
+        entry.update(state=state, diagnostic=reply.diagnostic)
         if outcome.interruption == "stopped":
             # Нас попросили остановиться: не задерживаем выход паузами и запусками CLI.
             return self.result(state, entry, reply, before, None)
@@ -239,21 +128,6 @@ class Worker:
             return Reply("", None, False, f"reply_error: {type(exc).__name__}: {exc}", {},
                          model=entry.meta.get("model"))
 
-    def key_for(self, request: Mapping[str, object]) -> str:
-        """Ключ считаем от запроса вместе со всем, что влияет на выполнение.
-
-        Модель, усилие, режим песочницы — смена любого из них должна заводить новый ход:
-        иначе старый ответ выдался бы за ответ на других условиях.
-        """
-        effective = dict(self.adapter.fingerprint())
-        effective.update({key: value for key, value in request.items() if value is not None})
-        session = request.get("session")
-        if session:
-            # Беседа — изменяемая: тот же вопрос после её продвижения даёт другой ответ,
-            # и старый нельзя выдавать из лотка. Номер хода в беседе входит в ключ.
-            effective["generation"] = self.generation(session)
-        return digest({"adapter": self.adapter.name, "request": effective})
-
     def pending(self) -> list[Entry]:
         return self.outbox.pending()
 
@@ -268,44 +142,19 @@ class Worker:
             log.warning("Папку %s убрать не удалось: %s", entry.folder.name, exc)
 
     def finished(self, entry: Entry) -> dict | None:
-        """Готовый ответ стоит ноль: отдаём его, не трогая ни лимит, ни состояние."""
-        if entry.meta.get("state") != "answered":
-            return None
+        """Готовый ответ уже оплачен: отдаём его, не трогая ни лимит, ни вход.
+
+        Смотрим в журнал, а не только в состояние: если процесс умер между ответом CLI
+        и записью состояния, ответ всё равно лежит в папке, и платить второй раз незачем.
+        """
+        if not entry.meta:
+            return None   # хода здесь ещё не было
         reply = self.parse(entry)
         if not reply.complete:
             return None
-        self.settle(entry)   # доделать продвижение беседы, если процесс упал до него
-        return self.result("resumed", entry, self.served(entry, reply), None, None)
-
-    def served(self, entry: Entry, reply: Reply) -> Reply:
-        """Ответ из лотка. Если беседа, которую он завёл, с тех пор ушла дальше,
-        его идентификатор больше не значит «продолжай отсюда» — и мы его не отдаём."""
-        meta = entry.meta
-        born = meta.get("born")
-        if not born or not isinstance(meta.get("born_generation"), int):
-            return reply
-        if self.generation(born) == meta["born_generation"]:
-            return reply
-        note = "беседа с тех пор продвинулась: продолжать с этого ответа уже нельзя"
-        return replace(reply, session_id=None,
-                       diagnostic="; ".join(part for part in (reply.diagnostic, note) if part))
-
-    def taken(self, entry: Entry) -> dict:
-        """Прошлая попытка кончилась ничем: отдаём её итог, а не «всё ещё идёт»."""
-        state = entry.meta.get("state") or "incomplete"
-        reply = self.parse(entry)
-        if reply.complete:
-            entry.update(state="answered")
-            self.settle(entry)
-            return self.result("resumed", entry, self.served(entry, reply), None, None)
-        if state in UNFINISHED:
-            # Записываем итог: так папка попадёт в лоток, и её можно будет забрать.
-            state = "incomplete"
-            entry.update(state=state, pid=None)
-        # Повтор — только по явной просьбе: автоматика иначе будет бесконечно
-        # переделывать то, что уже стоило денег.
-        return self.result(state, entry, reply, None, None,
-                           reason="прошлая попытка не завершилась; повтор — run(..., retry=True)")
+        if entry.meta.get("state") != "answered":
+            entry.update(state="answered", pid=None)
+        return self.result("resumed", entry, reply, None, None)
 
     def result(self, state, entry, reply, before, after, *, reason=None) -> dict:
         return {"state": state, "entry": entry, "reply": reply, "reason": reason,

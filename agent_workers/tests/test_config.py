@@ -83,11 +83,6 @@ def test_empty_value_means_off_not_default(tmp_path):
     assert settings_at(tmp_path, "AGENT_PROVIDER=claude").policy.refuse_above == 95.0
 
 
-def test_empty_outbox_size_falls_back_to_the_default(tmp_path):
-    settings = settings_at(tmp_path, "AGENT_PROVIDER=claude" "\n" "AGENT_MAX_PENDING=")
-    assert settings.max_pending == 50
-
-
 def test_comment_after_a_quoted_value_is_cut_off():
     """AGENT_MODEL="opus" # закреплено — кавычки снимаются, комментарий не прилипает."""
     values = parse('AGENT_MODEL="claude-opus-5" # закреплено')

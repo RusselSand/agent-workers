@@ -19,4 +19,4 @@ def build(settings: Settings | None = None) -> Worker:
     adapter = ADAPTERS[provider](**({"model": model} if model else {}))
     # Имя профиля — имя каталога: так в отчётах видно ровно то, что названо в настройках.
     return Worker(adapter, Profile(settings.home.name, settings.home),
-                  settings.runs, settings.policy, max_pending=settings.max_pending)
+                  settings.runs, settings.policy)

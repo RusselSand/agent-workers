@@ -2,8 +2,6 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-import pytest
-
 from agent_workers.base import Entry
 from agent_workers.providers.codex import (
     CodexAdapter,
@@ -71,10 +69,10 @@ def test_summary_file_outranks_streamed_message(sample, profile, tmp_path):
     assert adapter().reply(entry, profile).text == "итоговый ответ"
 
 
-def test_session_id_is_validated(tmp_path, profile):
-    entry = Entry(tmp_path, "run")
-    with pytest.raises(ValueError):
-        adapter().ask(entry, {"user": "x", "session": "; rm -rf /"}, profile)
+def test_every_turn_starts_a_new_session(tmp_path, profile):
+    """Ход — вопрос и ответ: продолжать чужую беседу не из чего и незачем."""
+    command = adapter().ask(Entry(tmp_path, "run"), {"user": "x", "session": "старая"}, profile)
+    assert "resume" not in command.argv
 
 
 def test_snapshot_reads_our_own_session(sample, profile):
@@ -145,25 +143,6 @@ def test_stale_snapshot_is_treated_as_unknown(sample, profile):
     assert guard.blocked(limits) == "Лимит неизвестен"
 
 
-def test_turn_usage_is_saved_before_the_session_moves_on(sample, profile, tmp_path):
-    """Беседу продолжат другим ходом, и last_token_usage в роллауте станет чужим."""
-    session = resumed_profile(sample, profile)
-    entry = Entry(tmp_path, "run")
-    entry.write("stdout.jsonl", sample("codex-exec-resumed.jsonl"))
-    first = adapter().reply(entry, profile)
-    assert first.tokens.input == 13773
-    assert entry.meta["usage"]["input_tokens"] == 13773     # запомнили сразу
-
-    rollout = next((profile.home / "sessions").rglob(f"*{session}.jsonl"))
-    grown = json.loads(rollout.read_text(encoding="utf-8").splitlines()[-1])
-    grown["payload"]["info"]["last_token_usage"] = {"input_tokens": 99999, "output_tokens": 7}
-    with rollout.open("a", encoding="utf-8") as tail:
-        tail.write(json.dumps(grown, ensure_ascii=False) + chr(10))
-
-    again = adapter().reply(entry, profile)
-    assert again.tokens.input == 13773                      # свой расход, а не чужого хода
-
-
 def test_proxy_and_certificates_reach_the_subprocess(monkeypatch, profile):
     from agent_workers.providers import common
 
@@ -183,15 +162,4 @@ def test_unlimited_credits_without_a_balance_are_still_credits(sample, profile):
     result["rateLimits"]["credits"] = {"hasCredits": True, "unlimited": True, "balance": None}
     assert credits_of(result["rateLimits"]) is None
     assert unlimited(result["rateLimits"]) is True
-
-
-def test_session_id_must_be_a_real_uuid(tmp_path, profile):
-    from agent_workers.providers.codex import session_id
-
-    misplaced = "01a0c345-2cd1-70e2-8daa7193e928f5d9-"
-    for bad in ("-" * 36, misplaced, "01a0c3452cd170e28daa7193e928f5d9-xx"):
-        with pytest.raises(ValueError, match="сессии"):
-            adapter().ask(Entry(tmp_path, "run"), {"user": "x", "session": bad}, profile)
-    canonical = "01a0c345-2cd1-70e2-8daa-7193e928f5d9"
-    assert session_id(canonical.upper()) == canonical
 

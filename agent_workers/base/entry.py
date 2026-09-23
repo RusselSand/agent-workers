@@ -1,18 +1,19 @@
 """Папка одного хода: состояние в state.json, транспорт — в журналах на дозапись.
 
-Владелец папки определяется замком операционной системы, а не записанным PID:
-замок снимается сам, когда процесс умер или контейнер перезапустили, поэтому
-брошенную работу не спутать с идущей.
+Имя папки — ключ задачи, который выдал координатор. Одну задачу в один момент делает
+один процесс: это гарантирует аренда координатора, а не папка.
+
+Замок операционной системы на файле внутри папки — страховка поверх аренды: он
+снимается сам, когда процесс умер или контейнер перезапустили, поэтому брошенную
+работу не спутать с идущей, а `collect` не снесёт журналы живого хода.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
 import time
-from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -65,13 +66,7 @@ class NotRemoved(RuntimeError):
     """Папку не удалось снести целиком — она снова всплывёт в лотке."""
 
 
-EMPTY = {"state": "prepared", "started": False, "session_id": None, "pid": None}
-
-
-def digest(value) -> str:
-    """Стабильный ключ хода: один и тот же запрос попадает в ту же папку."""
-    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+LOCK = "owner.lock"
 
 
 def folder_for(root: Path, key: str) -> Path:
@@ -91,66 +86,6 @@ def folder_for(root: Path, key: str) -> Path:
     return folder
 
 
-@contextmanager
-def registry(root: Path):
-    """Замок на каталог ходов: он переживает удаление любой папки внутри.
-
-    Нужен, потому что замок самой папки исчезает вместе с ней: между его снятием и
-    удалением каталога другой процесс успел бы взять папку и начать платный ход,
-    а удаление снесло бы его журналы. Берётся на мгновение — только чтобы взятие
-    папки и её удаление не наложились друг на друга.
-    """
-    private_dir(root)
-    handle = (root / ".registry.lock").open("a+b")
-    make_private(root / ".registry.lock", PRIVATE_FILE)
-    try:
-        wait_lock(handle)   # внутри try: не взяли замок — не потеряем дескриптор
-        try:
-            yield
-        finally:
-            free_lock(handle)
-    finally:
-        handle.close()
-
-
-def hold(path: Path):
-    """Неблокирующий замок на произвольный файл: дескриптор или None, если занят."""
-    private_dir(path.parent)
-    handle = path.open("a+b")
-    make_private(path, PRIVATE_FILE)
-    try:
-        take_lock(handle)
-    except OSError:
-        handle.close()
-        return None
-    return handle
-
-
-def let_go(handle) -> None:
-    if handle is None:
-        return
-    try:
-        free_lock(handle)
-    finally:
-        handle.close()
-
-
-@contextmanager
-def guarded(path: Path):
-    """Блокирующий замок на файл — для коротких операций «прочитал-сравнил-записал»."""
-    private_dir(path.parent)
-    handle = path.open("a+b")
-    make_private(path, PRIVATE_FILE)
-    try:
-        wait_lock(handle)
-        try:
-            yield
-        finally:
-            free_lock(handle)
-    finally:
-        handle.close()
-
-
 class Entry:
     def __init__(self, root: Path, key: str) -> None:
         self.folder = folder_for(root, key)
@@ -167,18 +102,18 @@ class Entry:
 
     @property
     def meta(self) -> dict:
-        """Пока никто не владел папкой, состояния нет — и это не пустая заготовка."""
+        """Пока ход не начинали, состояния нет."""
         if not self.state_path.is_file():
-            return dict(EMPTY)
+            return {}
         try:
             return json.loads(self.state_path.read_text(encoding="utf-8"))
         except ValueError:
-            return dict(EMPTY)
+            return {}
 
     @property
-    def attempted(self) -> bool:
-        """Ход уже начинали — неважно, чем он кончился."""
-        return bool(self.meta.get("started"))
+    def outcome(self) -> str:
+        """Итог папки, которой никто не владеет: всё, кроме готового ответа, — обрыв."""
+        return "answered" if self.meta.get("state") == "answered" else "incomplete"
 
     def update(self, **values) -> None:
         self._write({**self.meta, **values})
@@ -210,26 +145,22 @@ class Entry:
         """
         if self.lock is not None:
             return True
-        with registry(self.folder.parent):
-            private_dir(self.folder)
-            handle = (self.folder / "owner.lock").open("a+b")
-            make_private(self.folder / "owner.lock", PRIVATE_FILE)
-            try:
-                take_lock(handle)
-            except OSError:
-                handle.close()
-                return False
-            self.lock = handle
-            return True
+        private_dir(self.folder)
+        handle = (self.folder / LOCK).open("a+b")
+        make_private(self.folder / LOCK, PRIVATE_FILE)
+        try:
+            take_lock(handle)
+        except OSError:
+            handle.close()
+            return False
+        self.lock = handle
+        return True
 
     def busy(self) -> bool:
-        """Владеет ли папкой живой процесс. Пробуем замок и сразу отпускаем.
-
-        Без замка каталога: зовётся из-под него, а он не реентерабелен.
-        """
+        """Владеет ли папкой живой процесс. Пробуем замок и сразу отпускаем."""
         if self.lock is not None:
             return True
-        path = self.folder / "owner.lock"
+        path = self.folder / LOCK
         if not path.is_file():
             return False
         handle = path.open("a+b")
@@ -252,63 +183,28 @@ class Entry:
             self.lock.close()
             self.lock = None
 
-    def mark_started(self) -> None:
-        """Ход действительно начинается: отметка переживёт падение и не даст его повторить."""
-        self.update(started=True)
+    def reset(self) -> None:
+        """Новая попытка начинается с чистой папки: разбор не должен смешать её с прошлой.
 
-    def restart(self) -> int:
-        """Повтор: прежнюю попытку отодвигаем целиком, чтобы разбор не смешал две.
-
-        Переносим всё, кроме состояния и замка: что ещё лежит в папке, знает провайдер.
+        Прошлую попытку не храним: повтор решает координатор, а итог прошлой он уже
+        получил или не получит никогда.
         """
-        previous = self.meta
-        attempt = int(previous.get("attempt", 0)) + 1
-        archive = private_dir(self.folder / f"attempt-{attempt}")
-        keep = {self.state_path.name, "owner.lock"}
         for path in self.folder.iterdir():
-            if path.name in keep or path.name.startswith(("attempt-", "state.")):
+            if path.name == LOCK:
                 continue
-            path.replace(archive / path.name)
-        # Состояние прошлой попытки кладём рядом с её журналами: если новый ход не
-        # состоится, всё это можно вернуть на место, как будто повтора и не было.
-        atomic_write(archive / "state.json", json.dumps(previous, ensure_ascii=False, indent=2))
-        # Всё, что относилось к прошлой попытке — расход, сессия, код возврата, —
-        # уезжает вместе с ней: иначе новый ход отчитается чужими цифрами.
-        self._write({**EMPTY, "attempt": attempt})
-        return attempt
-
-    def rollback(self) -> None:
-        """Повтор не состоялся до запуска CLI: вернуть прежнюю попытку из архива."""
-        attempt = int(self.meta.get("attempt", 0))
-        archive = self.folder / f"attempt-{attempt}"
-        if attempt < 1 or not archive.is_dir():
-            return
-        keep = {self.state_path.name, "owner.lock"}
-        for path in self.folder.iterdir():
-            if path.name in keep or path.name.startswith(("attempt-", "state.")):
-                continue
-            shutil.rmtree(path) if path.is_dir() else path.unlink()   # следы несостоявшегося
-        saved = archive / "state.json"
-        previous = json.loads(saved.read_text(encoding="utf-8")) if saved.is_file() else EMPTY
-        saved.unlink(missing_ok=True)
-        for path in archive.iterdir():
-            path.replace(self.folder / path.name)
-        archive.rmdir()
-        self._write(dict(previous))
+            shutil.rmtree(path) if path.is_dir() else path.unlink()
 
     def drop(self) -> None:
-        """Забрали — папка не нужна: сносим целиком, вместе с отложенными попытками.
+        """Забрали — папка не нужна: сносим целиком.
 
-        Под замком каталога: пока идёт удаление, взять эту папку никто не может.
         Молчать об отказе нельзя — недоснесённая папка снова всплывёт в лотке.
         """
-        with registry(self.folder.parent):
-            self.release()
-            if not self.folder.exists():
-                return
-            shutil.rmtree(self.folder)
-            if self.folder.exists():
-                raise NotRemoved(f"Папку хода не удалось снести: {self.folder}")
+        self.release()   # на Windows открытый файл замка не удалить
+        if not self.folder.exists():
+            return
+        shutil.rmtree(self.folder)
+        if self.folder.exists():
+            raise NotRemoved(f"Папку хода не удалось снести: {self.folder}")
 
 
 if os.name == "nt":
@@ -318,17 +214,6 @@ if os.name == "nt":
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
 
-    def wait_lock(handle) -> None:
-        # LK_LOCK не ждёт бесконечно: сдаётся примерно через десять секунд с OSError.
-        # Удаление большой папки под замком может идти дольше — ждём, сколько нужно.
-        handle.seek(0)
-        while True:
-            try:
-                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-                return
-            except OSError:
-                continue
-
     def free_lock(handle) -> None:
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
@@ -337,9 +222,6 @@ else:
 
     def take_lock(handle) -> None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-    def wait_lock(handle) -> None:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
 
     def free_lock(handle) -> None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)

@@ -88,18 +88,12 @@ def test_login_without_subscription_is_refused():
         adapter().verify('{"loggedIn": true, "authMethod": "apiKey"}')
 
 
-def test_new_session_is_saved_so_it_can_be_continued(profile, tmp_path):
-    """Идентификатор сессии уходит наружу — значит её обязаны сохранить."""
+def test_turn_leaves_no_session_behind(profile, tmp_path):
+    """Ход — вопрос и ответ: беседу никто не продолжит, каталогу учётки незачем расти."""
     entry = Entry(tmp_path, "run")
-    command = adapter().ask(entry, {"user": "привет"}, profile)
-    assert "--no-session-persistence" not in command.argv
+    command = adapter().ask(entry, {"user": "привет", "session": "старая"}, profile)
+    assert "--no-session-persistence" in command.argv
     assert "--resume" not in command.argv
-
-
-def test_continuation_asks_for_the_same_session(profile, tmp_path):
-    entry = Entry(tmp_path, "run")
-    command = adapter().ask(entry, {"user": "дальше", "session": "сессия-1"}, profile)
-    assert command.argv[command.argv.index("--resume") + 1] == "сессия-1"
 
 
 def test_windows_of_other_models_do_not_limit_us(sample):

@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 from pathlib import Path
+from uuid import uuid4
 
 from .base.entry import Busy, Entry, NotRemoved
 from .base.outbox import Outbox
@@ -50,8 +52,7 @@ def pending(outbox: Outbox) -> int:
         print("лоток пуст")
         return 0
     for entry in waiting:
-        meta = entry.meta
-        print(f"{entry.folder.name}  {meta.get('state')}  модель {meta.get('model') or '—'}")
+        print(f"{entry.folder.name}  {entry.outcome}  модель {entry.meta.get('model') or '—'}")
     print()
     print(f"всего {len(waiting)}; забрать: python -m agent_workers collect <ключ|--all>")
     return 0
@@ -61,7 +62,7 @@ def collect(outbox: Outbox, options) -> int:
     """Забрали — сносим. Пока не забрали, результат лежит и ждёт."""
     if options.all:
         taken, busy, failed = 0, 0, []
-        for entry in outbox.pending():
+        for entry in outbox.entries():
             try:
                 outbox.collect(entry)
                 taken += 1
@@ -89,34 +90,15 @@ def run(worker: Worker, options) -> int:
     """Один ход: задание -> ответ, с расходом подписки и оценкой стоимости."""
     text = sys.stdin.read() if options.prompt == "-" else options.prompt
     request = {"user": text, "model": worker.adapter.model}
-    if options.session:
-        request["session"] = options.session   # продолжить прежнюю беседу, а не начать новую
     if options.system_file:
         request["system"] = Path(options.system_file).read_text(encoding="utf-8")
 
     if options.dry_run:
-        entry = Entry(worker.root, worker.key_for(request))
-        if not entry.claim():
-            # Тот же запрос выполняется прямо сейчас: его файлы трогать нельзя.
-            print("этот ход уже идёт в другом процессе", file=sys.stderr)
-            return 5
-        try:
-            command = worker.adapter.ask(entry, request, worker.profile)
-            print(f"каталог хода: {entry.folder}")
-            print("команда:", " ".join(command.argv))
-            print(f"stdin: {command.stdin}")
-        finally:
-            entry.release()
-        print()
-        print("Ничего не запущено и не потрачено.")
-        return 0
-
+        return dry_run(worker, request)
     try:
-        # Вход проверяется внутри и только когда ход действительно нужен: готовый ответ
-        # из лотка отдаётся и без входа — например, пока учётная запись разлогинена.
-        result = worker.run(request, retry=options.retry, ensure_login=True)
+        # У ручного хода нет задачи от координатора: каждый запуск — новый ход.
+        result = worker.run(request, key=uuid4().hex, ensure_login=True)
     except ValueError as exc:
-        # Ошибка в самом запросе — например, испорченный --session: не про вход.
         print(f"запрос отклонён: {exc}", file=sys.stderr)
         return 2
     except RuntimeError as exc:
@@ -127,27 +109,39 @@ def run(worker: Worker, options) -> int:
     if state == "limit_reached":
         print("ход не начат: " + result["reason"], file=sys.stderr)
         return 3
-    if state == "in_progress":
-        print("этот ход уже идёт в другом процессе", file=sys.stderr)
-        return 5
-    if state == "outbox_full":
-        print("лоток полон: " + result["reason"], file=sys.stderr)
-        print("заберите результаты: python -m agent_workers pending", file=sys.stderr)
-        return 6
-    if state == "aborted":
-        print("ход не начат: " + result["reason"], file=sys.stderr)
-        return 7
-    if result["reply"] is None or not result["reply"].text:
+    if result["reply"] is not None and result["reply"].text:
+        print(result["reply"].text)
+        report(result)
+    else:
         print(explain(result), file=sys.stderr)
-        return 4
+    if state == "answered":
+        deliver(worker, result["entry"])
+        return 0
+    # Ход оборвался: папку оставляем, в журналах видно, что пошло не так.
+    print(f"папка хода: {result['entry'].folder}", file=sys.stderr)
+    print(f"убрать: python -m agent_workers collect {result['entry'].folder.name}",
+          file=sys.stderr)
+    return 4
 
-    print(result["reply"].text)
-    if state == "resumed":
-        print("ответ взят из прежнего хода — ничего не потрачено", file=sys.stderr)
-    report(result)
-    if result["reason"]:
-        print(result["reason"], file=sys.stderr)
-    return 0 if state in ("answered", "resumed") else 4
+
+def dry_run(worker: Worker, request: dict) -> int:
+    """Пробный ход собирается во временном каталоге: папка ходов остаётся нетронутой."""
+    entry = Entry(Path(tempfile.mkdtemp(prefix="agent-dry-run-")), "ход")
+    command = worker.adapter.ask(entry, request, worker.profile)
+    print(f"каталог хода: {entry.folder}")
+    print("команда:", " ".join(command.argv))
+    print(f"stdin: {command.stdin}")
+    print()
+    print("Ничего не запущено и не потрачено.")
+    return 0
+
+
+def deliver(worker: Worker, entry: Entry) -> None:
+    """Ответ напечатан — значит доставлен, хранить его больше незачем."""
+    try:
+        worker.collect(entry)
+    except (Busy, NotRemoved, OSError) as exc:
+        print(f"папку хода убрать не удалось: {exc}", file=sys.stderr)
 
 
 def explain(result) -> str:
@@ -173,11 +167,6 @@ def report(result) -> None:
         print(f"окно {name}: {was}% -> {now}% ({delta:+})", file=sys.stderr)
     if result["reply"].diagnostic:
         print(f"замечание: {result['reply'].diagnostic}", file=sys.stderr)
-    if result["reply"].session_id:
-        # Единственное место, откуда человек узнаёт, чем продолжить беседу.
-        print(f"сессия: {result['reply'].session_id} · продолжить: "
-              f"--session {result['reply'].session_id}", file=sys.stderr)
-    print(f"папка хода: {result['entry'].folder}", file=sys.stderr)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -199,9 +188,6 @@ def parser() -> argparse.ArgumentParser:
         if name == "run":
             command.add_argument("prompt", help="текст задания, или - чтобы читать со stdin")
             command.add_argument("--system-file", help="файл с системной инструкцией")
-            command.add_argument("--session", help="продолжить сессию по её идентификатору")
-            command.add_argument("--retry", action="store_true",
-                                 help="переделать ход заново, отодвинув прошлую попытку")
             command.add_argument("--dry-run", action="store_true",
                                  help="показать команду и ничего не запускать")
     return root

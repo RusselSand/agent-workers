@@ -11,7 +11,6 @@ token_count. Он может быть устаревшим, поэтому по�
 from __future__ import annotations
 
 import json
-import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -28,24 +27,6 @@ ENV_HOME = "CODEX_HOME"
 
 APP_SERVER = ("app-server", "--listen", "stdio://")
 SUBSCRIPTION = ("chatgpt", "chatgptAuthTokens")
-
-
-def session_id(value: object) -> str:
-    """Идентификатор сессии Codex — настоящий UUID, а не любые 36 знаков из hex и дефисов.
-
-    Иначе «------------------------------------» проходил бы проверку, помечал ход
-    начатым и падал уже внутри `codex exec resume` — оплаченной незавершённой попыткой
-    вместо честного отказа до запуска.
-    """
-    text = str(value).strip().lower()
-    try:
-        parsed = uuid.UUID(text)
-    except (ValueError, AttributeError, TypeError):
-        raise ValueError(f"Неверный идентификатор сессии Codex: {value!r}") from None
-    if str(parsed) != text:
-        # uuid.UUID прощает дефисы не на месте и фигурные скобки — CLI не простит.
-        raise ValueError(f"Неверный идентификатор сессии Codex: {value!r}")
-    return text
 
 SOURCE = "openai, developers.openai.com/api/docs/pricing (снято 2026-09-21)"
 
@@ -190,10 +171,6 @@ class CodexAdapter:
         self.executable = common.find_executable(self.executable, "AGENT_CODEX_BINARY",
                                                  "codex.exe", "codex")
 
-    def fingerprint(self) -> Mapping[str, str]:
-        # Усилие и песочница уходят в командную строку — значит влияют на ответ.
-        return {"model": self.model, "effort": self.effort, "sandbox": self.sandbox}
-
     def environment(self, profile: Profile) -> Mapping[str, str]:
         return common.environment(profile, ENV_HOME)
 
@@ -219,15 +196,12 @@ class CodexAdapter:
         stdin = entry.write("invocation/prompt.txt", prompt)
         model = str(request.get("model") or self.model)
         entry.update(model=model)   # в ответе Codex модели нет, помним её с момента запроса
-        argv = [self.executable, "-a", "never", "exec", "-s", self.sandbox]
-        session = request.get("session")
-        if session:
-            argv += ["resume", session_id(session)]
-        argv += ["--ignore-user-config", "--skip-git-repo-check",
-                 "-m", model, "--json",
-                 "-o", str(entry.folder / "summary.txt"),
-                 "-c", f'model_reasoning_effort="{self.effort}"', "-"]
-        return Command(tuple(argv), self.environment(profile), entry.folder, stdin)
+        argv = (self.executable, "-a", "never", "exec", "-s", self.sandbox,
+                "--ignore-user-config", "--skip-git-repo-check",
+                "-m", model, "--json",
+                "-o", str(entry.folder / "summary.txt"),
+                "-c", f'model_reasoning_effort="{self.effort}"', "-")
+        return Command(argv, self.environment(profile), entry.folder, stdin)
 
     def reply(self, entry, profile: Profile) -> Reply:
         session, usage, complete, message = None, {}, False, ""
@@ -247,15 +221,7 @@ class CodexAdapter:
                 message = item["item"].get("text", "") or message
         text = entry.read("summary.txt") or message
         done = complete and bool(text)
-        # Роллаут — живой хвост сессии: продолжат беседу другим ходом, и last_token_usage
-        # станет чужим. Поэтому расход своего хода записываем сразу и потом берём его.
-        saved = entry.meta.get("usage")
-        if isinstance(saved, dict) and saved:
-            usage = saved
-        else:
-            usage = self.turn_usage(profile, session) or usage
-            if done and usage:
-                entry.update(usage=usage)
+        usage = self.turn_usage(profile, session) or usage
         return Reply(text, session, done, None if complete else "no_terminal_event", usage,
                      tokens_of(usage), entry.meta.get("model") or self.model)
 

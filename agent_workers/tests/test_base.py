@@ -18,7 +18,7 @@ from agent_workers.base import (
     Window,
     Worker,
 )
-from agent_workers.base.entry import Entry, NotRemoved, digest, folder_for, registry
+from agent_workers.base.entry import Entry, NotRemoved, folder_for
 
 QUIET = LimitPolicy(settle_reads=1, settle_delay=0)
 
@@ -37,9 +37,6 @@ class FakeAdapter:
     percent: list = field(default_factory=lambda: [10.0, 12.5])
     asked: list = field(default_factory=list)
     reads: int = 0
-
-    def fingerprint(self):
-        return {"model": getattr(self, "model", "")}
 
     def environment(self, profile):
         return dict(os.environ)
@@ -71,8 +68,8 @@ class FakeAdapter:
         return limits(self.percent.pop(0) if self.percent else 0.0)
 
 
-def test_digest_is_stable_for_the_same_request():
-    assert digest({"a": 1, "b": 2}) == digest({"b": 2, "a": 1})
+def worker_at(tmp_path, profile, adapter=None, policy=QUIET):
+    return Worker(adapter or FakeAdapter(tmp_path), profile, tmp_path / "runs", policy)
 
 
 def test_folder_is_owned_by_one_process_at_a_time(tmp_path):
@@ -83,6 +80,28 @@ def test_folder_is_owned_by_one_process_at_a_time(tmp_path):
     assert Entry(tmp_path, "run").claim() is True    # отпустил — можно брать
 
 
+def test_folder_lock_is_exclusive_between_processes(tmp_path):
+    """Замок должен держать чужой процесс, а не только собственный поток."""
+    import subprocess
+
+    probe = Path(__file__).with_name("probe_lock.py")
+    package = Path(__file__).resolve().parents[2]
+    owner = Entry(tmp_path, "ход")
+
+    def ask() -> str:
+        done = subprocess.run([sys.executable, str(probe), str(owner.folder / "owner.lock")],
+                              capture_output=True, text=True,
+                              env={**os.environ, "PYTHONPATH": str(package)})
+        return done.stdout.strip()
+
+    owner.claim()
+    try:
+        assert ask() == "held"
+    finally:
+        owner.release()
+    assert ask() == "free"
+
+
 def test_key_cannot_point_outside_the_folder(tmp_path):
     """Ключ приходит снаружи, а папку сносят рекурсивно: путь в ключе недопустим."""
     for key in ("..", ".", "", "../соседняя", "/abs", "C:/windows", "вложенный/путь"):
@@ -91,8 +110,14 @@ def test_key_cannot_point_outside_the_folder(tmp_path):
     assert folder_for(tmp_path, "обычный-ключ") == (tmp_path / "обычный-ключ").resolve()
 
 
+def test_key_is_required(tmp_path, profile):
+    """Ключ — идентификатор задачи. Выводить его из текста запроса воркер не берётся."""
+    with pytest.raises(TypeError):
+        worker_at(tmp_path, profile).run({"user": "привет"})
+
+
 def test_collect_refuses_a_key_that_is_a_path(tmp_path, profile):
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
+    worker = worker_at(tmp_path, profile)
     victim = tmp_path / "runs"
     victim.mkdir(parents=True)
     (victim / "чужое.txt").write_text("не трогать", encoding="utf-8")
@@ -103,14 +128,12 @@ def test_collect_refuses_a_key_that_is_a_path(tmp_path, profile):
 
 
 def test_collect_refuses_an_unknown_key(tmp_path, profile):
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
     with pytest.raises(ValueError, match="нет"):
-        worker.collect("никогда-не-существовавший")
+        worker_at(tmp_path, profile).collect("никогда-не-существовавший")
 
 
 def test_worker_measures_before_and_after_and_reports_the_price(tmp_path, profile):
-    adapter = FakeAdapter(tmp_path)
-    result = Worker(adapter, profile, tmp_path / "runs", QUIET).run({"user": "привет"})
+    result = worker_at(tmp_path, profile).run({"user": "привет"}, key="задача")
     assert result["state"] == "answered"
     assert result["reply"].text == "привет"
     assert result["before"].worst == 10.0 and result["after"].worst == 12.5
@@ -121,7 +144,7 @@ def test_worker_measures_before_and_after_and_reports_the_price(tmp_path, profil
 
 def test_worker_refuses_before_spending_anything(tmp_path, profile):
     adapter = FakeAdapter(tmp_path, percent=[97.0])
-    result = Worker(adapter, profile, tmp_path / "runs", QUIET).run({"user": "привет"})
+    result = worker_at(tmp_path, profile, adapter).run({"user": "привет"}, key="задача")
     assert result["state"] == "limit_reached"
     assert "97" in result["reason"]
     assert adapter.asked == []            # запрос не собирался
@@ -131,89 +154,112 @@ def test_worker_refuses_before_spending_anything(tmp_path, profile):
 def test_ready_answer_is_served_for_free(tmp_path, profile):
     """Готовый ответ уже оплачен: ни замера, ни сборки запроса, ни запуска."""
     adapter = FakeAdapter(tmp_path, percent=[1.0, 2.0])
-    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
-    worker.run({"user": "привет"})
+    worker = worker_at(tmp_path, profile, adapter)
+    worker.run({"user": "привет"}, key="задача")
     reads, asked = adapter.reads, len(adapter.asked)
 
-    again = worker.run({"user": "привет"})
+    again = worker.run({"user": "привет"}, key="задача")
     assert again["state"] == "resumed" and again["reply"].text == "привет"
     assert (adapter.reads, len(adapter.asked)) == (reads, asked)
     assert again["before"] is None and again["spent"] == {}
 
 
+def test_same_text_under_another_key_is_a_new_turn(tmp_path, profile):
+    """Одинаковый текст — ещё не та же задача: совпадений по тексту больше нет."""
+    adapter = FakeAdapter(tmp_path, percent=[1.0] * 4)
+    worker = worker_at(tmp_path, profile, adapter)
+    first = worker.run({"user": "привет"}, key="задача-1")
+    second = worker.run({"user": "привет"}, key="задача-2")
+    assert (first["state"], second["state"]) == ("answered", "answered")
+    assert first["entry"].folder != second["entry"].folder
+    assert len(adapter.asked) == 2
+
+
 def test_exhausted_window_does_not_hide_a_ready_answer(tmp_path, profile):
     """Иначе выбранный лимит стирал бы уже полученный ответ отказом."""
-    adapter = FakeAdapter(tmp_path, percent=[1.0, 2.0])
-    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
-    worker.run({"user": "привет"})
-    entry = Worker(adapter, profile, tmp_path / "runs", QUIET).run({"user": "привет"})["entry"]
+    entry = worker_at(tmp_path, profile).run({"user": "привет"}, key="задача")["entry"]
 
-    strict = Worker(FakeAdapter(tmp_path, percent=[99.0]), profile, tmp_path / "runs", QUIET)
-    served = strict.run({"user": "привет"})
+    strict = worker_at(tmp_path, profile, FakeAdapter(tmp_path, percent=[99.0]))
+    served = strict.run({"user": "привет"}, key="задача")
     assert served["state"] == "resumed"
     assert entry.meta["state"] == "answered"     # отказ не затирает состояние папки
 
 
-def test_dead_attempt_is_not_reported_as_running(tmp_path, profile):
-    """След оборванной попытки не должен выдавать себя за идущую работу."""
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
-    entry = Entry(tmp_path / "runs", worker.key_for({"user": "привет"}))
-    entry.mark_started()
-    entry.update(state="running", pid=999_999_999)   # владельца нет: замок никто не держит
+def test_cached_reply_is_served_even_when_login_cannot_be_checked(tmp_path, profile):
+    class LoggedOut(FakeAdapter):
+        def verify(self, captured):
+            raise RuntimeError("выхода из учётной записи")
 
-    stalled = worker.run({"user": "привет"})
-    assert stalled["state"] == "incomplete"
-    assert "retry" in stalled["reason"]
+    worker = worker_at(tmp_path, profile, LoggedOut(tmp_path))
+    worker.run({"user": "привет"}, key="задача")                        # ответ уже в лотке
+    served = worker.run({"user": "привет"}, key="задача", ensure_login=True)
+    assert served["state"] == "resumed"                                 # вход не понадобился
+    with pytest.raises(RuntimeError, match="вход не подтверждён"):
+        worker.run({"user": "новый вопрос"}, key="другая", ensure_login=True)   # а тут нужен
 
 
-def test_retry_starts_a_clean_attempt_and_keeps_the_old_one(tmp_path, profile):
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
-    entry = Entry(tmp_path / "runs", worker.key_for({"user": "привет"}))
-    entry.mark_started()
-    entry.write("stdout.jsonl", "обрывок прошлой попытки")
-    entry.update(state="incomplete")
+def test_answer_written_before_a_crash_is_not_paid_twice(tmp_path, profile):
+    """CLI ответила, а процесс умер до записи состояния: ответ лежит в журнале."""
+    adapter = FakeAdapter(tmp_path)
+    worker = worker_at(tmp_path, profile, adapter)
+    entry = Entry(tmp_path / "runs", "задача")
+    entry.write("stdout.jsonl", "привет")
+    entry.update(state="running", pid=999_999_999)     # владельца нет: замок никто не держит
 
-    again = worker.run({"user": "привет"}, retry=True)
+    served = worker.run({"user": "привет"}, key="задача")
+    assert served["state"] == "resumed" and served["reply"].text == "привет"
+    assert adapter.asked == []                          # второй раз не платили
+    assert entry.meta["state"] == "answered"
+
+
+def test_abandoned_attempt_is_run_again(tmp_path, profile):
+    """Задачу выдали снова — значит, повтор нужен. Сколько повторять, считает координатор."""
+    adapter = FakeAdapter(tmp_path)
+    entry = Entry(tmp_path / "runs", "задача")
+    entry.write("stdout.jsonl", "")
+    entry.update(state="running", pid=999_999_999)
+
+    again = worker_at(tmp_path, profile, adapter).run({"user": "привет"}, key="задача")
     assert again["state"] == "answered" and again["reply"].text == "привет"
-    kept = (again["entry"].folder / "attempt-1" / "stdout.jsonl").read_text(encoding="utf-8")
-    assert kept == "обрывок прошлой попытки"
+    assert len(adapter.asked) == 1
+
+
+def test_new_attempt_starts_from_a_clean_folder(tmp_path, profile):
+    """Журналы прошлой попытки не должны смешаться с новыми."""
+    entry = Entry(tmp_path / "runs", "задача")
+    entry.write("stdout.jsonl", "")
+    entry.write("summary.txt", "итог прошлой попытки")
+    entry.update(state="incomplete", diagnostic="timeout")
+
+    again = worker_at(tmp_path, profile).run({"user": "привет"}, key="задача")
+    assert again["state"] == "answered"
+    assert not (entry.folder / "summary.txt").exists()
+    assert entry.meta.get("diagnostic") is None
 
 
 def test_live_owner_is_left_alone(tmp_path, profile):
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
-    owner = Entry(tmp_path / "runs", worker.key_for({"user": "привет"}))
-    assert owner.claim() is True
-    try:
-        assert worker.run({"user": "привет"})["state"] == "in_progress"
-    finally:
-        owner.release()
-
-
-def test_retry_does_not_touch_a_live_attempt(tmp_path, profile):
-    """Иначе журналы работающего хода уехали бы в архив, а вызов оплатил бы его заново."""
+    """Иначе второй вызов оплатил бы ту же работу, а журналы писали бы двое."""
     adapter = FakeAdapter(tmp_path)
-    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
-    owner = Entry(tmp_path / "runs", worker.key_for({"user": "привет"}))
+    owner = Entry(tmp_path / "runs", "задача")
     owner.claim()
-    owner.mark_started()
     owner.write("stdout.jsonl", "идущая работа")
     try:
-        refused = worker.run({"user": "привет"}, retry=True)
+        refused = worker_at(tmp_path, profile, adapter).run({"user": "привет"}, key="задача")
     finally:
         owner.release()
     assert refused["state"] == "in_progress"
     assert adapter.asked == []                                   # второго вызова не было
     assert owner.read("stdout.jsonl") == "идущая работа"          # журнал на месте
-    assert not (owner.folder / "attempt-1").exists()              # архива не появилось
 
 
 def test_result_waits_in_the_outbox_until_it_is_collected(tmp_path, profile):
     """Папка живёт не по таймеру, а пока результат не заберут."""
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
-    result = worker.run({"user": "привет"})
+    worker = worker_at(tmp_path, profile)
+    result = worker.run({"user": "привет"}, key="задача")
 
     waiting = worker.pending()
     assert [entry.folder for entry in waiting] == [result["entry"].folder]
+    assert waiting[0].outcome == "answered"
 
     worker.collect(waiting[0])
     assert worker.pending() == []
@@ -221,30 +267,178 @@ def test_result_waits_in_the_outbox_until_it_is_collected(tmp_path, profile):
 
 
 def test_collected_answer_is_no_longer_served_for_free(tmp_path, profile):
-    adapter = FakeAdapter(tmp_path, percent=[1.0, 2.0, 3.0, 4.0])
-    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
-    worker.collect(worker.run({"user": "привет"})["entry"])
-    assert worker.run({"user": "привет"})["state"] == "answered"   # выполнили заново, честно
-
-
-def test_full_outbox_stops_new_turns_instead_of_filling_the_disk(tmp_path, profile):
-    adapter = FakeAdapter(tmp_path, percent=[1.0, 2.0])
-    worker = Worker(adapter, profile, tmp_path / "runs", QUIET, max_pending=1)
-    worker.run({"user": "первый"})
-    reads, asked = adapter.reads, len(adapter.asked)
-
-    stopped = worker.run({"user": "второй"})
-    assert stopped["state"] == "outbox_full"
-    assert (adapter.reads, len(adapter.asked)) == (reads, asked)   # ничего не потрачено
-    assert len(worker.pending()) == 1                              # мусора не прибавилось
+    worker = worker_at(tmp_path, profile, FakeAdapter(tmp_path, percent=[1.0] * 4))
+    worker.collect(worker.run({"user": "привет"}, key="задача")["entry"])
+    assert worker.run({"user": "привет"}, key="задача")["state"] == "answered"   # заново
 
 
 def test_refused_turn_leaves_no_folder_behind(tmp_path, profile):
-    worker = Worker(FakeAdapter(tmp_path, percent=[99.0]), profile, tmp_path / "runs", QUIET)
-    refused = worker.run({"user": "привет"})
+    worker = worker_at(tmp_path, profile, FakeAdapter(tmp_path, percent=[99.0]))
+    refused = worker.run({"user": "привет"}, key="задача")
     assert refused["state"] == "limit_reached"
     assert not refused["entry"].folder.exists()
     assert worker.pending() == []
+
+
+def test_failed_login_check_leaves_no_folder_behind(tmp_path, profile):
+    class LoggedOut(FakeAdapter):
+        def verify(self, captured):
+            raise RuntimeError("выхода из учётной записи")
+
+    worker = worker_at(tmp_path, profile, LoggedOut(tmp_path))
+    with pytest.raises(RuntimeError):
+        worker.run({"user": "вопрос"}, key="задача", ensure_login=True)
+    assert not any((tmp_path / "runs").iterdir())
+
+
+def test_broken_request_leaves_no_folder_behind(tmp_path, profile):
+    class Picky(FakeAdapter):
+        def ask(self, entry, request, profile):
+            raise ValueError("нет обязательного поля")
+
+    worker = worker_at(tmp_path, profile, Picky(tmp_path))
+    with pytest.raises(ValueError):
+        worker.run({"user": "плохое"}, key="задача")
+    assert worker.pending() == [] and not any((tmp_path / "runs").iterdir())
+
+
+def test_interrupt_while_building_the_request_leaves_no_folder_behind(tmp_path, profile):
+    class Interrupted(FakeAdapter):
+        def ask(self, entry, request, profile):
+            raise KeyboardInterrupt
+
+    worker = worker_at(tmp_path, profile, Interrupted(tmp_path))
+    with pytest.raises(KeyboardInterrupt):
+        worker.run({"user": "раз"}, key="задача")
+    assert worker.pending() == []
+
+
+def test_shutdown_requested_before_launch_does_not_start_a_turn(tmp_path, profile):
+    adapter = FakeAdapter(tmp_path)
+    result = worker_at(tmp_path, profile, adapter).run({"user": "вопрос"}, key="задача",
+                                                       stop=lambda: True)
+    assert result["state"] == "aborted"
+    assert adapter.asked == []                          # CLI не запускалась
+    assert not result["entry"].folder.exists()
+
+
+def test_interrupted_turn_ends_up_in_the_outbox_not_in_limbo(tmp_path, profile):
+    """Ctrl+C посреди хода: папка становится «незавершённой», её видно и можно забрать."""
+    import agent_workers.base.worker as worker_module
+
+    keep = worker_module.supervise
+
+    def broken_supervise(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    worker_module.supervise = broken_supervise
+    worker = worker_at(tmp_path, profile)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            worker.run({"user": "два"}, key="задача")
+    finally:
+        worker_module.supervise = keep
+
+    stuck = worker.pending()
+    assert len(stuck) == 1 and stuck[0].meta["state"] == "incomplete"
+    worker.collect(stuck[0])
+    assert worker.pending() == []
+
+
+def test_abandoned_folder_is_visible_and_collectable(tmp_path, profile):
+    """Папка без владельца — итог, каким бы он ни был. Невидимых папок не бывает."""
+    worker = worker_at(tmp_path, profile)
+    crashed = Entry(tmp_path / "runs", "упал-посреди-хода")
+    crashed.write("stdout.jsonl", "")
+    crashed.update(state="running")
+    half = Entry(tmp_path / "runs", "упал-до-состояния")
+    half.write("invocation/input.txt", "задание")
+
+    waiting = {entry.folder.name: entry.outcome for entry in worker.pending()}
+    assert waiting == {"упал-посреди-хода": "incomplete", "упал-до-состояния": "incomplete"}
+    for entry in worker.pending():
+        worker.collect(entry)
+    assert not any((tmp_path / "runs").iterdir())
+
+
+def test_broken_reply_parsing_is_an_incomplete_result_not_a_crash(tmp_path, profile):
+    class Unparseable(FakeAdapter):
+        def reply(self, entry, profile):
+            raise ValueError("формат вывода изменился")
+
+    worker = worker_at(tmp_path, profile, Unparseable(tmp_path, percent=[1.0] * 4))
+    result = worker.run({"user": "вопрос"}, key="задача")
+    assert result["state"] == "incomplete"
+    assert "reply_error" in result["reply"].diagnostic
+    again = worker.run({"user": "вопрос"}, key="задача")   # папка не роняет читающих
+    assert again["state"] == "incomplete"
+
+
+def test_running_entry_cannot_be_collected(tmp_path, profile):
+    """Снести папку идущего хода — значит выдернуть у него журналы и замок из-под ног."""
+    worker = worker_at(tmp_path, profile)
+    owner = Entry(tmp_path / "runs", "живой-ход")
+    owner.claim()
+    owner.update(state="running")
+    try:
+        assert worker.pending() == []                 # идущий ход — не итог
+        with pytest.raises(RuntimeError, match="выполняется"):
+            worker.collect("живой-ход")
+    finally:
+        owner.release()
+    assert owner.folder.exists()
+    worker.collect("живой-ход")          # владелец ушёл — теперь можно
+    assert not owner.folder.exists()
+
+
+def test_new_entry_writes_nothing_before_it_runs(tmp_path):
+    entry = Entry(tmp_path, "ход")
+    assert not entry.state_path.exists()
+    assert entry.meta == {}
+
+
+def test_latecomer_does_not_overwrite_the_live_state(tmp_path):
+    owner = Entry(tmp_path, "ход")
+    owner.claim()
+    owner.update(state="running")
+
+    latecomer = Entry(tmp_path, "ход")          # второй процесс на том же ключе
+    assert latecomer.claim() is False           # владения не получил
+    assert latecomer.meta["state"] == "running"  # и ничего не переписал
+    owner.release()
+
+
+def test_failed_removal_is_reported_not_swallowed(tmp_path, profile):
+    """Недоснесённая папка снова всплывёт в лотке — молчать об этом нельзя."""
+    import agent_workers.base.entry as entry_module
+
+    worker = worker_at(tmp_path, profile)
+    entry = Entry(tmp_path / "runs", "ход")
+    entry.update(state="answered")
+
+    original = entry_module.shutil.rmtree
+    entry_module.shutil.rmtree = lambda *a, **k: None    # как будто удалить не вышло
+    try:
+        with pytest.raises(NotRemoved):
+            worker.collect("ход")
+    finally:
+        entry_module.shutil.rmtree = original
+    assert entry.folder.exists()
+
+
+def test_run_folder_is_readable_only_by_its_owner(tmp_path):
+    if os.name == "nt":
+        pytest.skip("на Windows права выставляются иначе")
+    entry = Entry(tmp_path, "ход")
+    entry.claim()
+    entry.update(state="answered")
+    entry.write("invocation/input.txt", "секретное задание")
+    try:
+        assert entry.folder.stat().st_mode & 0o077 == 0
+        assert entry.state_path.stat().st_mode & 0o077 == 0
+        assert (entry.folder / "invocation" / "input.txt").stat().st_mode & 0o077 == 0
+    finally:
+        entry.release()
 
 
 def test_measurement_after_the_turn_waits_for_accounting(tmp_path, profile):
@@ -278,6 +472,14 @@ def test_exhausted_window_with_credits_left_is_not_a_stop(tmp_path, profile):
     assert strict.blocked(spent) == "Окно выбрано на 100%"
 
 
+def test_unlimited_credits_keep_the_worker_going(tmp_path, profile):
+    guard = Guard(FakeAdapter(tmp_path), profile, QUIET)
+    spent = Limits("fake", "t", (Window("primary", 100.0),), datetime.now(UTC), "t", True,
+                   credits=None, credits_unlimited=True)
+    assert guard.blocked(spent) is None
+    assert guard.blocked(limits(100.0)) == "Окно выбрано на 100%"
+
+
 def test_stale_snapshot_counts_as_unknown(tmp_path, profile):
     policy = LimitPolicy(on_unknown="refuse", stale_after=timedelta(minutes=1))
     guard = Guard(FakeAdapter(tmp_path), profile, policy)
@@ -291,177 +493,14 @@ def test_failed_measurement_does_not_break_the_turn(tmp_path, profile):
         def limits(self, profile, *, session=None, model=None):
             raise OSError("зонд недоступен")
 
-    result = Worker(Broken(tmp_path), profile, tmp_path / "runs", QUIET).run({"user": "привет"})
+    result = worker_at(tmp_path, profile, Broken(tmp_path)).run({"user": "привет"}, key="задача")
     assert result["state"] == "answered" and result["before"] is None
-
-
-def test_running_entry_cannot_be_collected(tmp_path, profile):
-    """Снести папку идущего хода — значит выдернуть у него журналы и замок из-под ног."""
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
-    owner = Entry(tmp_path / "runs", "живой-ход")
-    owner.claim()
-    owner.update(state="running", started=True)
-    try:
-        with pytest.raises(RuntimeError, match="выполняется"):
-            worker.collect("живой-ход")
-    finally:
-        owner.release()
-    assert owner.folder.exists()
-    worker.collect("живой-ход")          # владелец ушёл — теперь можно
-    assert not owner.folder.exists()
-
-
-def test_new_entry_writes_nothing_before_it_is_owned(tmp_path):
-    """Иначе двое, пришедшие одновременно, затрут состояние друг друга."""
-    entry = Entry(tmp_path, "ход")
-    assert not entry.state_path.exists()
-    assert entry.meta["state"] == "prepared" and entry.attempted is False
-
-
-def test_latecomer_does_not_overwrite_the_live_state(tmp_path):
-    owner = Entry(tmp_path, "ход")
-    owner.claim()
-    owner.update(state="running", started=True)
-
-    latecomer = Entry(tmp_path, "ход")          # второй процесс на том же ключе
-    assert latecomer.claim() is False           # владения не получил
-    assert latecomer.meta["state"] == "running"  # и ничего не переписал
-    owner.release()
-
-
-def test_registry_lock_is_exclusive_between_processes(tmp_path):
-    """Замок каталога должен держать чужой процесс, а не только собственный поток."""
-    import subprocess
-    import sys
-
-    probe = Path(__file__).with_name('probe_lock.py')
-    package = Path(__file__).resolve().parents[2]
-    lock = tmp_path / '.registry.lock'
-
-    def ask() -> str:
-        done = subprocess.run([sys.executable, str(probe), str(lock)],
-                              capture_output=True, text=True,
-                              env={**os.environ, 'PYTHONPATH': str(package)})
-        return done.stdout.strip()
-
-    with registry(tmp_path):
-        assert ask() == 'held'
-    assert ask() == 'free'
-
-
-def test_deletion_happens_under_the_registry_lock(tmp_path, profile):
-    """Замок самой папки исчезает вместе с ней, поэтому удаление держит замок каталога."""
-    from contextlib import contextmanager
-
-    import agent_workers.base.entry as entry_module
-
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / 'runs', QUIET)
-    entry = Entry(tmp_path / 'runs', 'ход')
-    entry.claim()
-    entry.update(state='answered')
-    entry.release()
-
-    order = []
-    keep_registry = entry_module.registry
-    keep_rmtree = entry_module.shutil.rmtree
-
-    @contextmanager
-    def watched(root):
-        order.append('замок взят')
-        with keep_registry(root):
-            yield
-        order.append('замок снят')
-
-    def rmtree(path, *args, **kwargs):
-        order.append('удаление')
-        keep_rmtree(path, *args, **kwargs)
-
-    entry_module.registry, entry_module.shutil.rmtree = watched, rmtree
-    try:
-        worker.collect('ход')
-    finally:
-        entry_module.registry = keep_registry
-        entry_module.shutil.rmtree = keep_rmtree
-    assert order[-3:] == ['замок взят', 'удаление', 'замок снят']
-    assert not entry.folder.exists()
-
-
-def test_failed_removal_is_reported_not_swallowed(tmp_path, profile):
-    """Недоснесённая папка снова всплывёт в лотке — молчать об этом нельзя."""
-    import agent_workers.base.entry as entry_module
-
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
-    entry = Entry(tmp_path / "runs", "ход")
-    entry.claim()
-    entry.update(state="answered")
-    entry.release()
-
-    original = entry_module.shutil.rmtree
-    entry_module.shutil.rmtree = lambda *a, **k: None    # как будто удалить не вышло
-    try:
-        with pytest.raises(NotRemoved):
-            worker.collect("ход")
-    finally:
-        entry_module.shutil.rmtree = original
-    assert entry.folder.exists()
-
-
-def test_key_depends_on_the_model_that_will_answer(tmp_path, profile):
-    """Иначе смена модели отдала бы старый ответ из лотка как свой."""
-    class Named(FakeAdapter):
-        model = "первая-модель"
-
-    worker = Worker(Named(tmp_path), profile, tmp_path / "runs", QUIET)
-    other = Worker(Named(tmp_path), profile, tmp_path / "runs", QUIET)
-    other.adapter.model = "вторая-модель"
-
-    assert worker.key_for({"user": "привет"}) != other.key_for({"user": "привет"})
-    assert worker.key_for({"user": "привет"}) == worker.key_for(
-        {"user": "привет", "model": "первая-модель"})
-
-
-def test_answer_of_another_model_is_not_served_as_ours(tmp_path, profile):
-    class Named(FakeAdapter):
-        model = "первая-модель"
-
-    first = Worker(Named(tmp_path), profile, tmp_path / "runs", QUIET)
-    first.run({"user": "привет"})
-
-    second = Worker(Named(tmp_path), profile, tmp_path / "runs", QUIET)
-    second.adapter.model = "вторая-модель"
-    assert second.run({"user": "привет"})["state"] == "answered"   # выполнили заново
-
-
-def test_started_turn_takes_a_slot_in_the_outbox(tmp_path, profile):
-    """Иначе несколько процессов, глядя на один лоток, стартуют разом и перевалят предел."""
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET, max_pending=1)
-    started = Entry(tmp_path / "runs", "чужой-ход")
-    started.claim()
-    started.mark_started()          # ход идёт, результата ещё нет
-    started.update(state="running")
-    started.release()
-
-    assert worker.outbox.occupied() == 1
-    assert worker.pending() == []   # в лотке пусто, но место занято
-    assert worker.run({"user": "привет"})["state"] == "outbox_full"
-
-
-def test_retry_forgets_the_numbers_of_the_previous_attempt(tmp_path, profile):
-    """Расход и сессия относились к прошлой попытке, новый ход отчитается своими."""
-    entry = Entry(tmp_path, "ход")
-    entry.claim()
-    entry.update(state="answered", started=True, usage={"input_tokens": 13773},
-                 session_id="сессия-1", returncode=0)
-    entry.restart()
-    assert "usage" not in entry.meta and entry.meta["session_id"] is None
-    assert entry.meta["attempt"] == 1 and entry.attempted is False
-    entry.release()
 
 
 def test_disabled_measurement_is_not_an_unknown_quota(tmp_path, profile):
     """Выключенный замер — решение вызывающего, а не повод всё запретить."""
     policy = LimitPolicy(before=False, after=False, on_unknown="refuse")
-    result = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", policy).run({"user": "ок"})
+    result = worker_at(tmp_path, profile, policy=policy).run({"user": "ок"}, key="задача")
     assert result["state"] == "answered" and result["before"] is None
 
 
@@ -476,111 +515,6 @@ def test_window_that_reset_mid_turn_is_not_counted_as_spending(tmp_path, profile
                                     Window("week", 11.0, resets_at=moment)),
                    moment, "test", True)
     assert guard.spent(before, after) == {"week": 1.0}
-
-
-def test_settings_that_change_execution_change_the_key(tmp_path, profile):
-    class Tuned(FakeAdapter):
-        model = "модель"
-        effort = "medium"
-
-        def fingerprint(self):
-            return {"model": self.model, "effort": self.effort}
-
-    worker = Worker(Tuned(tmp_path), profile, tmp_path / "runs", QUIET)
-    other = Worker(Tuned(tmp_path), profile, tmp_path / "runs", QUIET)
-    other.adapter.effort = "high"
-    assert worker.key_for({"user": "ок"}) != other.key_for({"user": "ок"})
-
-
-def test_broken_request_frees_the_slot_it_reserved(tmp_path, profile):
-    """Кривые задания не должны потихоньку забивать лоток."""
-    class Picky(FakeAdapter):
-        def ask(self, entry, request, profile):
-            raise ValueError("нет обязательного поля")
-
-    worker = Worker(Picky(tmp_path), profile, tmp_path / "runs", QUIET, max_pending=2)
-    for _ in range(3):
-        with pytest.raises(ValueError):
-            worker.run({"user": "плохое"})
-    assert worker.outbox.occupied() == 0
-    assert Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET,
-                  max_pending=2).run({"user": "хорошее"})["state"] == "answered"
-
-
-def test_loop_hands_the_stop_signal_to_the_tick(tmp_path):
-    """Сигнал во время долгого хода должен дойти до самого хода, а не ждать его конца."""
-    import threading
-
-    from agent_workers.base import run_loop
-
-    stop = threading.Event()
-    seen = []
-
-    def tick(signal):
-        seen.append(signal)
-        signal.set()          # как будто сигнал пришёл внутрь хода
-
-    assert run_loop(tick, poll_seconds=0, stop=stop) == 0
-    assert seen == [stop] and stop.is_set()
-
-
-def test_run_folder_is_readable_only_by_its_owner(tmp_path):
-    if os.name == "nt":
-        pytest.skip("на Windows права выставляются иначе")
-    entry = Entry(tmp_path, "ход")
-    entry.claim()
-    entry.update(state="answered")
-    entry.write("invocation/input.txt", "секретное задание")
-    try:
-        assert entry.folder.stat().st_mode & 0o077 == 0
-        assert entry.state_path.stat().st_mode & 0o077 == 0
-        assert (entry.folder / "invocation" / "input.txt").stat().st_mode & 0o077 == 0
-    finally:
-        entry.release()
-
-
-def test_interrupt_while_building_the_request_frees_the_slot(tmp_path, profile):
-    class Interrupted(FakeAdapter):
-        def ask(self, entry, request, profile):
-            raise KeyboardInterrupt
-
-    worker = Worker(Interrupted(tmp_path), profile, tmp_path / "runs", QUIET, max_pending=1)
-    with pytest.raises(KeyboardInterrupt):
-        worker.run({"user": "раз"})
-    assert worker.outbox.occupied() == 0
-
-
-def test_interrupted_turn_ends_up_in_the_outbox_not_in_limbo(tmp_path, profile):
-    """Ctrl+C посреди хода: папка становится «незавершённой», её видно и можно забрать."""
-    import agent_workers.base.worker as worker_module
-
-    keep = worker_module.supervise
-
-    def broken_supervise(*args, **kwargs):
-        raise KeyboardInterrupt
-
-    worker_module.supervise = broken_supervise
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET, max_pending=1)
-    try:
-        with pytest.raises(KeyboardInterrupt):
-            worker.run({"user": "два"})
-    finally:
-        worker_module.supervise = keep
-
-    stuck = worker.pending()
-    assert len(stuck) == 1 and stuck[0].meta["state"] == "incomplete"
-    worker.collect(stuck[0])                      # а не вечное занятое место
-    assert worker.outbox.occupied() == 0
-
-
-def test_dead_attempt_becomes_collectable(tmp_path, profile):
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
-    entry = Entry(tmp_path / "runs", worker.key_for({"user": "привет"}))
-    entry.mark_started()
-    entry.update(state="running")
-    assert worker.pending() == []
-    assert worker.run({"user": "привет"})["state"] == "incomplete"
-    assert [e.folder for e in worker.pending()] == [entry.folder]
 
 
 def test_clock_jitter_in_reset_time_is_not_a_reset(tmp_path, profile):
@@ -604,7 +538,7 @@ def test_measurement_uses_the_model_of_the_request(tmp_path, profile):
             return super().limits(profile, session=session, model=model)
 
     adapter = Watching(tmp_path, percent=[1.0, 1.0, 1.0])
-    Worker(adapter, profile, tmp_path / "runs", QUIET).run({"user": "ок", "model": "другая"})
+    worker_at(tmp_path, profile, adapter).run({"user": "ок", "model": "другая"}, key="задача")
     assert adapter.asked_models and set(adapter.asked_models) == {"другая"}
 
 
@@ -617,64 +551,27 @@ def test_no_measurement_after_a_requested_stop(tmp_path, profile):
     worker_module.supervise = lambda *a, **k: Outcome(None, "stopped")
     adapter = FakeAdapter(tmp_path, percent=[1.0, 2.0, 3.0])
     try:
-        result = Worker(adapter, profile, tmp_path / "runs", QUIET).run({"user": "ок"})
+        result = worker_at(tmp_path, profile, adapter).run({"user": "ок"}, key="задача")
     finally:
         worker_module.supervise = keep
     assert result["after"] is None and adapter.reads == 1
 
 
-def test_cached_reply_is_served_even_when_login_cannot_be_checked(tmp_path, profile):
-    class LoggedOut(FakeAdapter):
-        def verify(self, captured):
-            raise RuntimeError("выхода из учётной записи")
+def test_loop_hands_the_stop_signal_to_the_tick(tmp_path):
+    """Сигнал во время долгого хода должен дойти до самого хода, а не ждать его конца."""
+    import threading
 
-    adapter = LoggedOut(tmp_path)
-    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
-    worker.run({"user": "привет"})                                  # ответ уже в лотке
-    served = worker.run({"user": "привет"}, ensure_login=True)
-    assert served["state"] == "resumed"                             # вход не понадобился
-    with pytest.raises(RuntimeError, match="вход не подтверждён"):
-        worker.run({"user": "новый вопрос"}, ensure_login=True)     # а тут нужен
+    from agent_workers.base import run_loop
 
+    stop = threading.Event()
+    seen = []
 
-def test_dead_reservation_is_neither_counted_nor_mistaken_for_a_turn(tmp_path, profile):
-    """Процесс убили между бронью и запуском CLI: папка пуста, ход не стоил ничего."""
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET, max_pending=1)
-    stale = Entry(tmp_path / "runs", worker.key_for({"user": "привет"}))
-    stale.update(state="reserved")            # бронь есть, владельца нет, старта не было
+    def tick(signal):
+        seen.append(signal)
+        signal.set()          # как будто сигнал пришёл внутрь хода
 
-    assert worker.outbox.occupied() == 0      # лоток не забивается чередой падений
-    result = worker.run({"user": "привет"})
-    assert result["state"] == "answered"      # выполнили, а не объявили оборванным
-
-
-def test_live_reservation_takes_a_slot(tmp_path, profile):
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET, max_pending=1)
-    owner = Entry(tmp_path / "runs", "чужая-бронь")
-    owner.claim()
-    owner.update(state="reserved")
-    try:
-        assert worker.outbox.occupied() == 1
-        assert worker.run({"user": "привет"})["state"] == "outbox_full"
-    finally:
-        owner.release()
-
-
-def test_continuations_of_one_conversation_take_turns(tmp_path, profile):
-    """Два продолжения одной беседы с разными вопросами не идут одновременно."""
-    from agent_workers.base.entry import hold, let_go
-
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
-    session = "беседа-1"
-    busy = hold(tmp_path / "runs" / ".sessions" / f"{digest(session)}.lock")
-    try:
-        blocked = worker.run({"user": "второй вопрос", "session": session})
-        assert blocked["state"] == "in_progress" and "беседу" in blocked["reason"]
-        other = worker.run({"user": "вопрос", "session": "беседа-2"})
-        assert other["state"] == "answered"          # чужая беседа не мешает
-    finally:
-        let_go(busy)
-    assert worker.run({"user": "второй вопрос", "session": session})["state"] == "answered"
+    assert run_loop(tick, poll_seconds=0, stop=stop) == 0
+    assert seen == [stop] and stop.is_set()
 
 
 def test_relative_account_folder_becomes_absolute(tmp_path, monkeypatch):
@@ -731,55 +628,6 @@ def test_stopping_a_turn_kills_its_grandchildren(tmp_path):
         pytest.fail("внук пережил снятие хода")
 
 
-def test_same_prompt_after_the_conversation_moved_on_is_a_new_turn(tmp_path, profile):
-    """«Продолжай» после того, как беседа продвинулась, — другой вопрос, не тот же ответ."""
-    worker = Worker(FakeAdapter(tmp_path, percent=[1.0] * 10), profile, tmp_path / "runs", QUIET)
-    first = worker.run({"user": "продолжай", "session": "беседа"})
-    assert first["state"] == "answered"
-
-    again = worker.run({"user": "продолжай", "session": "беседа"})  # беседа уже продвинулась
-    assert again["state"] == "answered"                             # выполнили заново
-    assert again["entry"].folder != first["entry"].folder
-
-    # Свой ключ задачи — единственный способ попросить именно тот, старый результат.
-    keyed = worker.run({"user": "вопрос", "session": "беседа"}, key="задача-7")
-    assert worker.run({"user": "вопрос", "session": "беседа"}, key="задача-7")["state"] == "resumed"
-    assert keyed["state"] == "answered"
-
-
-def test_generation_survives_a_crash_so_a_retry_still_resumes(tmp_path, profile):
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
-    key_before = worker.key_for({"user": "вопрос", "session": "беседа"})
-    worker.run({"user": "вопрос", "session": "беседа"})
-    # Тот же вопрос той же беседы, пока она не продвинулась дальше, — та же папка.
-    assert worker.key_for({"user": "вопрос", "session": "беседа"}) != key_before
-    assert worker.generation("беседа") == 1
-
-
-def test_ready_answer_is_served_while_the_conversation_is_busy(tmp_path, profile):
-    """Готовый ответ беседу не трогает — его отдают, не дожидаясь её очереди."""
-    from agent_workers.base.entry import hold, let_go
-
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
-    worker.run({"user": "первый", "session": "беседа"}, key="задача-1")
-    busy = hold(worker.session_file("беседа", "lock"))
-    try:
-        served = worker.run({"user": "первый", "session": "беседа"}, key="задача-1")
-        assert served["state"] == "resumed"
-        redo = worker.run({"user": "первый", "session": "беседа"}, key="задача-1", retry=True)
-        assert redo["state"] == "in_progress"          # а повтор — это новый ход, ждёт
-    finally:
-        let_go(busy)
-
-
-def test_unlimited_credits_keep_the_worker_going(tmp_path, profile):
-    guard = Guard(FakeAdapter(tmp_path), profile, QUIET)
-    spent = Limits("fake", "t", (Window("primary", 100.0),), datetime.now(UTC), "t", True,
-                   credits=None, credits_unlimited=True)
-    assert guard.blocked(spent) is None
-    assert guard.blocked(limits(100.0)) == "Окно выбрано на 100%"
-
-
 def test_stubborn_grandchild_is_killed_after_the_leader_exits(tmp_path):
     """Лидер вышел по SIGTERM сразу, внук сигнал проигнорировал — его снимает SIGKILL."""
     if os.name == "nt":
@@ -804,180 +652,3 @@ def test_stubborn_grandchild_is_killed_after_the_leader_exits(tmp_path):
         time.sleep(0.1)
     else:
         pytest.fail("упрямый внук пережил снятие хода")
-
-
-def test_crash_between_answer_and_advance_is_healed_on_next_read(tmp_path, profile):
-    """Ответ записан, номер беседы — нет: следующее чтение доделает, а не заморозит."""
-    worker = Worker(FakeAdapter(tmp_path, percent=[1.0] * 10), profile, tmp_path / "runs", QUIET)
-    worker.run({"user": "продолжай", "session": "беседа"})
-    assert worker.generation("беседа") == 1
-    worker.session_file("беседа", "gen").write_text("0", encoding="utf-8")   # как будто упали
-
-    healed = worker.run({"user": "продолжай", "session": "беседа"})
-    assert healed["state"] == "resumed"                # тот же ключ — тот же ответ
-    assert worker.generation("беседа") == 1            # и номер восстановлен из папки
-    assert worker.run({"user": "продолжай", "session": "беседа"})["state"] == "answered"
-
-
-def test_no_stray_folder_when_the_conversation_is_busy(tmp_path, profile):
-    from agent_workers.base.entry import hold, let_go
-
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
-    busy = hold(worker.session_file("беседа", "lock"))
-    try:
-        blocked = worker.run({"user": "новый вопрос", "session": "беседа"})
-    finally:
-        let_go(busy)
-    assert blocked["state"] == "in_progress"
-    assert not blocked["entry"].folder.exists()        # папку завели зря — убрали
-
-
-def test_retry_keeps_the_old_result_when_preflight_fails(tmp_path, profile):
-    """Отказ до запуска не должен стирать результат, который ещё можно доставить."""
-    class LoggedOut(FakeAdapter):
-        def verify(self, captured):
-            raise RuntimeError("выхода из учётной записи")
-
-    adapter = LoggedOut(tmp_path, percent=[1.0, 1.0, 99.0])
-    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
-    first = worker.run({"user": "вопрос"}, key="задача")
-    assert first["state"] == "answered"
-
-    with pytest.raises(RuntimeError):                  # вход не подтверждён
-        worker.run({"user": "вопрос"}, key="задача", retry=True, ensure_login=True)
-    refused = worker.run({"user": "вопрос"}, key="задача", retry=True)   # лимит 99%
-    assert refused["state"] == "limit_reached"
-
-    kept = worker.run({"user": "вопрос"}, key="задача")
-    assert kept["state"] == "resumed" and kept["reply"].text == "вопрос"
-    assert not (first["entry"].folder / "attempt-1").exists()   # архив не заводился
-
-
-def test_shutdown_requested_before_launch_does_not_start_a_turn(tmp_path, profile):
-    adapter = FakeAdapter(tmp_path)
-    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
-    result = worker.run({"user": "вопрос"}, stop=lambda: True)
-    assert result["state"] == "aborted"
-    assert adapter.asked == []                          # CLI не запускалась
-    assert worker.outbox.occupied() == 0                # бронь снята
-
-
-def test_broken_reply_parsing_is_an_incomplete_result_not_a_crash(tmp_path, profile):
-    class Unparseable(FakeAdapter):
-        def reply(self, entry, profile):
-            raise ValueError("формат вывода изменился")
-
-    worker = Worker(Unparseable(tmp_path), profile, tmp_path / "runs", QUIET)
-    result = worker.run({"user": "вопрос"})
-    assert result["state"] == "incomplete"
-    assert "reply_error" in result["reply"].diagnostic
-    again = worker.run({"user": "вопрос"})              # папка не роняет читающих
-    assert again["state"] == "incomplete" and "retry" in again["reason"]
-
-
-def test_failed_login_check_leaves_no_hidden_folder_for_a_new_request(tmp_path, profile):
-    class LoggedOut(FakeAdapter):
-        def verify(self, captured):
-            raise RuntimeError("выхода из учётной записи")
-
-    worker = Worker(LoggedOut(tmp_path), profile, tmp_path / "runs", QUIET)
-    with pytest.raises(RuntimeError):
-        worker.run({"user": "вопрос"}, ensure_login=True)
-    assert not any((tmp_path / "runs").glob("[!.]*"))      # ни одной папки хода
-
-
-def test_first_time_retry_still_reserves_a_slot(tmp_path, profile):
-    """retry по ключу без прошлой попытки — обычный первый ход, с бронью и уборкой."""
-    from agent_workers.base.outbox import Outbox
-
-    class Peeking(FakeAdapter):
-        seen: list = []
-
-        def limits(self, profile, *, session=None, model=None):
-            self.seen.append(Outbox(tmp_path / "runs").occupied())
-            return super().limits(profile, session=session, model=model)
-
-    adapter = Peeking(tmp_path, percent=[1.0, 1.0])
-    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
-    result = worker.run({"user": "вопрос"}, key="новая", retry=True)
-    assert result["state"] == "answered"
-    assert adapter.seen[0] == 1                       # во время замера место уже занято
-    assert not (result["entry"].folder / "attempt-1").exists()   # архивировать было нечего
-
-
-def test_generation_never_moves_backwards(tmp_path, profile):
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
-    worker.advance("беседа", 2)
-    worker.advance("беседа", 1)                       # запоздалое восстановление
-    assert worker.generation("беседа") == 2
-    assert worker.session_file("беседа", "gen.lock").exists()   # обновление шло под замком
-
-
-def test_readers_never_see_an_empty_or_backwards_generation(tmp_path, profile):
-    """Пишущий подменяет файл целиком: читатель видит старое или новое, но не пустое."""
-    import threading
-
-    worker = Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET)
-    observed, stop = [], threading.Event()
-
-    def reader():
-        while not stop.is_set():
-            observed.append(worker.generation("беседа"))
-
-    watcher = threading.Thread(target=reader)
-    watcher.start()
-    try:
-        for step in range(1, 60):
-            worker.advance("беседа", step)
-    finally:
-        stop.set()
-        watcher.join()
-    # Читатель отстаёт как угодно, но никогда не видит ни пустого файла, ни отката.
-    assert observed and all(later >= earlier
-                            for earlier, later in zip(observed, observed[1:], strict=False))
-    first_seen = next(i for i, value in enumerate(observed) if value)
-    assert 0 not in observed[first_seen:]
-    assert worker.generation("беседа") == 59
-    assert not list(worker.session_file("беседа", "gen").parent.glob("*.tmp"))
-
-
-def test_initial_turn_stops_advertising_its_session_once_it_moved_on(tmp_path, profile):
-    """Ответ первого хода из лотка не должен звать продолжать беседу, где уже есть чужие ходы."""
-    worker = Worker(FakeAdapter(tmp_path, percent=[1.0] * 10), profile, tmp_path / "runs", QUIET)
-    first = worker.run({"user": "начало"})
-    assert first["state"] == "answered" and first["reply"].session_id == "session-1"
-    assert worker.run({"user": "начало"})["reply"].session_id == "session-1"   # пока не ушла
-
-    worker.run({"user": "дальше", "session": "session-1"})                    # беседа ушла
-    stale = worker.run({"user": "начало"})
-    assert stale["state"] == "resumed" and stale["reply"].text == "начало"   # ответ тот же
-    assert stale["reply"].session_id is None                                  # а продолжать — нет
-    assert "продвинулась" in stale["reply"].diagnostic
-
-
-def test_failed_request_construction_restores_the_previous_attempt(tmp_path, profile):
-    """Повтор упал на сборке запроса: прежний результат возвращается на место."""
-    class Flaky(FakeAdapter):
-        fail = False
-
-        def ask(self, entry, request, profile):
-            if self.fail:
-                raise OSError("не записался файл задания")
-            return super().ask(entry, request, profile)
-
-    adapter = Flaky(tmp_path, percent=[1.0] * 10)
-    worker = Worker(adapter, profile, tmp_path / "runs", QUIET)
-    first = worker.run({"user": "вопрос"}, key="задача")
-    assert first["state"] == "answered"
-
-    adapter.fail = True
-    with pytest.raises(OSError):
-        worker.run({"user": "вопрос"}, key="задача", retry=True)
-    adapter.fail = False
-
-    assert not (first["entry"].folder / "attempt-1").exists()      # архива не осталось
-    assert first["entry"].meta["state"] == "answered"
-    assert [e.folder for e in worker.pending()] == [first["entry"].folder]
-    kept = worker.run({"user": "вопрос"}, key="задача")
-    assert kept["state"] == "resumed" and kept["reply"].text == "вопрос"
-

@@ -196,9 +196,6 @@ class ClaudeAdapter:
         self.executable = common.find_executable(self.executable, "AGENT_CLAUDE_BINARY",
                                                  "claude.exe", "claude")
 
-    def fingerprint(self) -> Mapping[str, str]:
-        return {"model": self.model}
-
     def environment(self, profile: Profile) -> Mapping[str, str]:
         return common.environment(profile, ENV_HOME, EXTRA_ENV)
 
@@ -227,19 +224,16 @@ class ClaudeAdapter:
     def ask(self, entry, request: Mapping[str, object], profile: Profile) -> Command:
         system = entry.write("invocation/system.md", str(request.get("system") or ""))
         stdin = entry.write("invocation/input.txt", str(request["user"]))
-        session = request.get("session")
         model = str(request.get("model") or self.model)
         entry.update(model=model)
         # Без --include-partial-messages: пословные фрагменты раздували бы журнал,
         # а разбор всё равно читает только целые сообщения и итог.
-        argv = [self.executable, "-p", "--output-format", "stream-json", "--verbose",
+        # Ход — вопрос и ответ, продолжать его никто не будет: беседу не сохраняем,
+        # иначе каталог учётной записи рос бы с каждым ходом.
+        argv = (self.executable, "-p", "--output-format", "stream-json", "--verbose",
                 "--model", model, "--tools", "", "--strict-mcp-config", "--mcp-config", MCP_OFF,
-                "--system-prompt-file", str(system)]
-        # Сессию сохраняем всегда: её идентификатор уходит вызывающему, и он вправе
-        # продолжить беседу. С --no-session-persistence такое продолжение невозможно.
-        if session:
-            argv += ["--resume", str(session)]
-        return Command(tuple(argv), self.environment(profile), entry.folder, stdin)
+                "--system-prompt-file", str(system), "--no-session-persistence")
+        return Command(argv, self.environment(profile), entry.folder, stdin)
 
     def reply(self, entry, profile: Profile) -> Reply:
         streamed, terminal, session = [], None, None

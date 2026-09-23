@@ -98,12 +98,6 @@ class Settings:
         return (Path(named) if named else self.home / "runs").resolve()
 
     @property
-    def max_pending(self) -> int:
-        """Сколько готовых и не забранных результатов терпеть, прежде чем встать."""
-        value = self.get("AGENT_MAX_PENDING", "50").strip()
-        return int(value) if value else 50
-
-    @property
     def policy(self) -> LimitPolicy:
         refuse = self.get("AGENT_REFUSE_ABOVE", "95").strip()
         return LimitPolicy(refuse_above=float(refuse) if refuse else None,

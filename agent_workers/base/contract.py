@@ -141,9 +141,6 @@ class Adapter(Protocol):
 
     def environment(self, profile: Profile) -> Mapping[str, str]: ...
 
-    def fingerprint(self) -> Mapping[str, str]:
-        """Настройки, от которых зависит ответ: модель, усилие, режим песочницы."""
-
     def check(self, profile: Profile) -> Command: ...
 
     def verify(self, captured: str) -> None:

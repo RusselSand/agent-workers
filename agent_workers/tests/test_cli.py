@@ -63,6 +63,15 @@ def test_prompt_can_come_from_stdin(monkeypatch, capsys):
     assert written.read_text(encoding="utf-8") == "задание из файла"
 
 
+def test_dry_run_leaves_nothing_in_the_runs_folder(tmp_path, capsys):
+    """Пробный ход собирается во временном каталоге: в лотке от него ничего не остаётся."""
+    cli.main(["run", "--dry-run", "привет"])
+    folder = folder_of(capsys.readouterr().out)
+    runs = tmp_path / "учётка" / "runs"
+    assert runs not in folder.parents
+    assert not runs.exists() or not any(runs.iterdir())
+
+
 def test_run_refuses_before_spending_when_login_is_missing(capsys):
     # Поддельный «исполняемый файл» не отвечает статусом входа — значит, хода не будет.
     assert cli.main(["run", "привет"]) == 2
@@ -85,9 +94,46 @@ def test_unknown_provider_is_rejected_by_the_parser():
         cli.main(["run", "--provider", "gemini", "привет"])
 
 
-def test_retry_is_reachable_from_the_command_line():
-    options = cli.parser().parse_args(["run", "--retry", "привет"])
-    assert options.retry is True and options.prompt == "привет"
+def finished_run(tmp_path, monkeypatch, state, text="ответ"):
+    """Подменяет ход: папка в лотке и результат, какой вернул бы воркер."""
+    from agent_workers.base import Entry, Reply
+    from agent_workers.base import worker as worker_module
+
+    made = []
+
+    def fake_run(self, request, *, key, **kwargs):
+        entry = Entry(self.root, key)
+        entry.write("stdout.jsonl", text)
+        entry.update(state=state)
+        made.append(entry)
+        return {"state": state, "entry": entry, "reason": None,
+                "reply": Reply(text, complete=state == "answered"),
+                "tokens": None, "cost": None, "before": None, "after": None, "spent": {}}
+
+    monkeypatch.setattr(worker_module.Worker, "run", fake_run)
+    return made
+
+
+def test_answer_is_printed_and_its_folder_removed(tmp_path, monkeypatch, capsys):
+    """Ответ напечатан — значит доставлен: лоток ручными ходами не забивается."""
+    made = finished_run(tmp_path, monkeypatch, "answered")
+    assert cli.main(["run", "привет"]) == 0
+    assert capsys.readouterr().out.strip() == "ответ"
+    assert not made[0].folder.exists()
+
+
+def test_every_run_is_a_new_turn(tmp_path, monkeypatch):
+    made = finished_run(tmp_path, monkeypatch, "answered")
+    cli.main(["run", "привет"])
+    cli.main(["run", "привет"])
+    assert made[0].folder.name != made[1].folder.name
+
+
+def test_broken_turn_keeps_its_folder_for_diagnosis(tmp_path, monkeypatch, capsys):
+    made = finished_run(tmp_path, monkeypatch, "incomplete", text="")
+    assert cli.main(["run", "привет"]) == 4
+    assert made[0].folder.exists()
+    assert f"collect {made[0].folder.name}" in capsys.readouterr().err
 
 
 def ready_entry(tmp_path, text="ответ"):
@@ -139,24 +185,6 @@ def test_collect_all_skips_what_is_busy(tmp_path, capsys):
     assert busy.folder.exists()
 
 
-def test_dry_run_does_not_touch_a_running_entry(tmp_path, capsys):
-    """Файлы задания у идущего хода читает живая CLI — переписывать их нельзя."""
-    from agent_workers import build
-    from agent_workers.base import Entry
-    from agent_workers.config import Settings
-
-    worker = build(Settings.load(tmp_path))
-    owner = Entry(worker.root, worker.key_for({"user": "привет", "model": worker.adapter.model}))
-    owner.claim()
-    owner.write("invocation/input.txt", "задание идущего хода")
-    try:
-        assert cli.main(["run", "--dry-run", "привет"]) == 5
-    finally:
-        owner.release()
-    assert owner.read("invocation/input.txt") == "задание идущего хода"
-    assert "уже идёт" in capsys.readouterr().err
-
-
 def test_outbox_commands_work_without_the_provider_cli(tmp_path, monkeypatch, capsys):
     """CLI может быть снесена или сломана обновлением — забрать готовое всё равно нужно."""
     ready_entry(tmp_path)
@@ -174,30 +202,19 @@ def test_empty_reply_is_explained_with_the_cli_diagnostic():
 
     failed = {"reason": None, "reply": Reply("", diagnostic="cli_error: Rate limit reached")}
     assert cli.explain(failed) == "cli_error: Rate limit reached"
-    assert cli.explain({"reason": "прошлая попытка не завершилась", "reply": None}) == (
-        "прошлая попытка не завершилась")
+    assert cli.explain({"reason": "ход уже выполняется", "reply": None}) == (
+        "ход уже выполняется")
     assert cli.explain({"reason": None, "reply": None}) == "ход не дал ответа"
-
-
-def test_report_tells_how_to_continue_the_conversation(tmp_path, capsys):
-    from agent_workers.base import Entry, Reply
-
-    entry = Entry(tmp_path, "ход")
-    result = {"reply": Reply("ок", session_id="сессия-42", complete=True), "entry": entry,
-              "tokens": None, "cost": None, "before": None, "after": None, "spent": {},
-              "reason": None}
-    cli.report(result)
-    assert "--session сессия-42" in capsys.readouterr().err
 
 
 def test_invalid_request_is_a_concise_message_not_a_traceback(monkeypatch, capsys):
     from agent_workers.base import worker as worker_module
 
     def rejecting(self, request, **kwargs):
-        raise ValueError("Неверный идентификатор сессии Codex")
+        raise ValueError("Нет обязательного поля")
 
     monkeypatch.setattr(worker_module.Worker, "run", rejecting)
-    assert cli.main(["run", "--session", "; rm -rf /", "привет"]) == 2
+    assert cli.main(["run", "привет"]) == 2
     err = capsys.readouterr().err
     assert "запрос отклонён" in err and "Traceback" not in err and "login" not in err
 
