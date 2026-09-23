@@ -328,6 +328,22 @@ def test_cli_that_cannot_start_leaves_no_paid_looking_folder(tmp_path, profile):
     assert not (tmp_path / "runs" / "задача").exists()
 
 
+def test_failed_setup_before_launch_leaves_no_paid_looking_folder(tmp_path, profile):
+    """Сломалась подготовка к запуску — журналы, stdin: процесс не стартовал,
+    ход ничего не стоил."""
+    class LostInput(FakeAdapter):
+        def ask(self, entry, request, profile):
+            command = super().ask(entry, request, profile)
+            return Command(command.argv, command.env, command.cwd,
+                           stdin=tmp_path / "исчезнувшее-задание.txt")
+
+    worker = worker_at(tmp_path, profile, LostInput(tmp_path))
+    with pytest.raises(OSError):
+        worker.run({"user": "вопрос"}, key="задача")
+    assert worker.pending() == []
+    assert not (tmp_path / "runs" / "задача").exists()
+
+
 def test_shutdown_requested_before_launch_does_not_start_a_turn(tmp_path, profile):
     adapter = FakeAdapter(tmp_path)
     result = worker_at(tmp_path, profile, adapter).run({"user": "вопрос"}, key="задача",
@@ -343,8 +359,9 @@ def test_interrupted_turn_ends_up_in_the_outbox_not_in_limbo(tmp_path, profile):
 
     keep = worker_module.supervise
 
-    def broken_supervise(*args, **kwargs):
-        raise KeyboardInterrupt
+    def broken_supervise(*args, on_start, **kwargs):
+        on_start()                  # процесс уже запущен —
+        raise KeyboardInterrupt     # и тут Ctrl+C
 
     worker_module.supervise = broken_supervise
     worker = worker_at(tmp_path, profile)

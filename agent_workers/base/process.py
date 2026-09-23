@@ -113,10 +113,15 @@ def launch(command: Command, stdin, out, err) -> subprocess.Popen:
 
 
 def supervise(command: Command, *, stdout: Path, stderr: Path, pulse=None, stop=None,
-              timeout: float = 1200, sync_every: float = 20) -> Outcome:
-    """Длинный ход. Журналы только дозаписываются, чтобы обрыв не уносил уже полученное."""
+              on_start=None, timeout: float = 1200, sync_every: float = 20) -> Outcome:
+    """Длинный ход. Журналы только дозаписываются, чтобы обрыв не уносил уже полученное.
+
+    on_start зовётся ровно тогда, когда процесс уже запущен: всё, что сломалось раньше, —
+    журналы, stdin, сам запуск — случилось до хода, и платить там было не за что.
+    """
     pulse = pulse or (lambda: None)
     stop = stop or (lambda: False)
+    on_start = on_start or (lambda: None)
     for journal in (stdout, stderr):
         journal.touch(mode=0o600, exist_ok=True)
     stdin = command.stdin.open("rb") if command.stdin else subprocess.DEVNULL
@@ -124,8 +129,9 @@ def supervise(command: Command, *, stdout: Path, stderr: Path, pulse=None, stop=
     try:
         with stdout.open("ab", buffering=0) as out, stderr.open("ab", buffering=0) as err:
             process = launch(command, stdin, out, err)
-            started = last_sync = time.monotonic()
             try:
+                on_start()   # внутри try: сорвётся отметка — процесс всё равно снимем
+                started = last_sync = time.monotonic()
                 while process.poll() is None:
                     now = time.monotonic()
                     if stop():
