@@ -103,8 +103,10 @@ class Worker:
 
         def running() -> None:
             nonlocal launched
-            entry.update(state="running", pid=os.getpid())   # с этого места ход стоит денег
+            # Сначала факт, потом запись о нём: процесс уже запущен, и если запись
+            # сорвётся, это обрыв хода, а не отказ до него — журналы нельзя сносить.
             launched = True
+            entry.update(state="running", pid=os.getpid())   # с этого места ход стоит денег
 
         try:
             outcome = supervise(command, stdout=entry.stdout, stderr=entry.stderr,

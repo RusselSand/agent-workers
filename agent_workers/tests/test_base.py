@@ -344,6 +344,25 @@ def test_failed_setup_before_launch_leaves_no_paid_looking_folder(tmp_path, prof
     assert not (tmp_path / "runs" / "задача").exists()
 
 
+def test_failed_state_write_after_launch_keeps_the_journals(tmp_path, profile, monkeypatch):
+    """Процесс уже стартовал, а отметка «идёт» не записалась: это обрыв хода, не отказ до
+    него. Журналы остаются в лотке — по ним видно, что было."""
+    keep = Entry.update
+
+    def full_disk(self, **values):
+        if values.get("state") == "running":
+            raise OSError("на диске нет места")
+        keep(self, **values)
+
+    monkeypatch.setattr(Entry, "update", full_disk)
+    worker = worker_at(tmp_path, profile)
+    with pytest.raises(OSError, match="нет места"):
+        worker.run({"user": "вопрос"}, key="задача")
+    waiting = worker.pending()
+    assert [entry.folder.name for entry in waiting] == ["задача"]
+    assert waiting[0].meta["state"] == "incomplete"
+
+
 def test_shutdown_requested_before_launch_does_not_start_a_turn(tmp_path, profile):
     adapter = FakeAdapter(tmp_path)
     result = worker_at(tmp_path, profile, adapter).run({"user": "вопрос"}, key="задача",
