@@ -42,6 +42,10 @@ class Outbox:
             if not folder.is_dir() or not is_entry(folder):
                 raise ValueError(f"Хода с таким ключом нет: {entry}")
             entry = Entry(self.root, folder.name)
+        elif entry.folder.parent != Path(self.root).resolve():
+            # Папку другого воркера не сносим: это чужой оплаченный результат. И по имени
+            # не пересобираем — у нас может быть своя папка с тем же ключом.
+            raise ValueError(f"Ход {entry.folder} не из этого лотка ({self.root})")
         if not entry.claim():
             raise Busy(f"Ход {entry.folder.name} выполняется прямо сейчас; забирать нельзя")
         entry.drop()

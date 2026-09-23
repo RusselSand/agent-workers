@@ -266,6 +266,19 @@ def test_result_waits_in_the_outbox_until_it_is_collected(tmp_path, profile):
     assert not result["entry"].folder.exists()
 
 
+def test_collect_refuses_an_entry_of_another_worker(tmp_path, profile):
+    """Два воркера в одном процессе: результат одного не сносится лотком другого."""
+    first = Worker(FakeAdapter(tmp_path), profile, tmp_path / "первый", QUIET)
+    second = Worker(FakeAdapter(tmp_path), profile, tmp_path / "второй", QUIET)
+    theirs = second.run({"user": "привет"}, key="задача")["entry"]
+    ours = first.run({"user": "привет"}, key="задача")["entry"]
+
+    with pytest.raises(ValueError, match="не из этого лотка"):
+        first.collect(theirs)
+    assert theirs.folder.exists()
+    assert ours.folder.exists()               # и свою папку с тем же ключом не тронули
+
+
 def test_collected_answer_is_no_longer_served_for_free(tmp_path, profile):
     worker = worker_at(tmp_path, profile, FakeAdapter(tmp_path, percent=[1.0] * 4))
     worker.collect(worker.run({"user": "привет"}, key="задача")["entry"])
