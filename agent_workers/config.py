@@ -17,6 +17,7 @@ from .base.guard import LimitPolicy
 
 FILENAME = ".env"
 DEPTH = 4
+YES = ("1", "true", "yes", "да")
 NO = ("0", "false", "no", "нет")
 
 
@@ -118,17 +119,36 @@ class Settings:
     def model(self) -> str:
         return self.get("AGENT_MODEL")
 
+    def binary(self, provider: str) -> str | None:
+        """Путь к CLI провайдера, если назван: AGENT_CLAUDE_BINARY, AGENT_CODEX_BINARY.
+        Относительный — по тем же правилам, что и прочие пути из настроек."""
+        found = self.path_of(f"AGENT_{provider.upper()}_BINARY")
+        return str(found) if found else None
+
     @property
     def runs(self) -> Path:
         return self.path_of("AGENT_RUNS") or (self.home / "runs").resolve()
 
+    def flag(self, key: str, default: bool) -> bool:
+        """Да или нет. Опечатка — ошибка настройки, а не «да»: иначе `flase` в
+        AGENT_SPEND_CREDITS молча разрешил бы тратить кредиты."""
+        value = self.get(key).strip().lower()
+        if not value:
+            return default
+        if value in YES:
+            return True
+        if value in NO:
+            return False
+        raise ValueError(f"{key} — да ({', '.join(YES)}) или нет ({', '.join(NO)}); "
+                         f"сейчас: {value!r}")
+
     @property
     def policy(self) -> LimitPolicy:
+        spend = self.flag("AGENT_SPEND_CREDITS", default=True)
         refuse = self.get("AGENT_REFUSE_ABOVE", "95").strip()
         try:
             return LimitPolicy(refuse_above=float(refuse) if refuse else None,
-                               spend_credits=self.get("AGENT_SPEND_CREDITS", "1").lower()
-                               not in NO)
+                               spend_credits=spend)
         except ValueError:
             raise ValueError(f"AGENT_REFUSE_ABOVE — процент от 0 до 100, а пустое значение "
                              f"снимает порог; сейчас: {refuse!r}") from None

@@ -48,6 +48,7 @@ AGENT_MODEL=claude-opus-5                      # необязательно
 AGENT_RUNS=...                                 # папки ходов, по умолчанию <HOME>/runs
 AGENT_REFUSE_ABOVE=95                          # не начинать ход при таком расходе окна
 AGENT_SPEND_CREDITS=1                          # 0 — стоять даже при остатке кредитов
+AGENT_CODEX_BINARY=...                         # путь к CLI, если её нет в PATH
 ```
 
 `AGENT_HOME` — это `CLAUDE_CONFIG_DIR` или `CODEX_HOME` подпроцесса, то есть каталог

@@ -525,22 +525,49 @@ def test_latecomer_does_not_overwrite_the_live_state(tmp_path):
     owner.release()
 
 
-def test_failed_removal_is_reported_not_swallowed(tmp_path, profile):
+def test_failed_removal_is_reported_not_swallowed(tmp_path, profile, monkeypatch):
     """Недоснесённая папка снова всплывёт в лотке — молчать об этом нельзя."""
-    import agent_workers.base.entry as entry_module
-
     worker = worker_at(tmp_path, profile)
     entry = Entry(tmp_path / "runs", "ход")
     entry.update(state="answered")
 
-    original = entry_module.shutil.rmtree
-    entry_module.shutil.rmtree = lambda *a, **k: None    # как будто удалить не вышло
-    try:
-        with pytest.raises(NotRemoved):
-            worker.collect("ход")
-    finally:
-        entry_module.shutil.rmtree = original
+    monkeypatch.setattr(Path, "rmdir", lambda self: None)    # как будто удалить не вышло
+    with pytest.raises(NotRemoved):
+        worker.collect("ход")
     assert entry.folder.exists()
+
+
+def test_half_removed_entry_stays_visible(tmp_path, profile, monkeypatch):
+    """Удаление сорвалось посередине: признаки хода на месте, папка по-прежнему в лотке."""
+    from agent_workers.base.entry import STATE
+
+    worker = worker_at(tmp_path, profile)
+    entry = Entry(tmp_path / "runs", "ход")
+    entry.claim()
+    entry.write("invocation/input.txt", "задание")
+    entry.write("stdout.jsonl", "ответ")
+    entry.update(state="answered")
+    entry.release()
+
+    real_unlink = os.unlink
+
+    def locked(path, *args, **kwargs):
+        # Журнал занят, как бывает на Windows; остальное удаляется как обычно.
+        if str(path).endswith("stdout.jsonl"):
+            raise PermissionError("журнал занят другим процессом")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", locked)
+    monkeypatch.setattr(os, "remove", locked)
+    with pytest.raises(OSError):
+        worker.collect("ход")
+    assert (entry.folder / STATE).is_file()
+    assert (entry.folder / LOCK).is_file()
+    assert [e.folder.name for e in worker.pending()] == ["ход"]
+
+    monkeypatch.undo()                                        # помеха ушла — забираем
+    worker.collect("ход")
+    assert not entry.folder.exists()
 
 
 def test_run_folder_is_readable_only_by_its_owner(tmp_path):
@@ -676,6 +703,27 @@ def test_no_measurement_after_a_requested_stop(tmp_path, profile):
         worker_module.supervise = keep
     assert result["after"] is None
     assert adapter.reads == 1
+
+
+def test_no_measurement_after_when_stop_comes_right_after_the_turn(tmp_path, profile,
+                                                                   monkeypatch):
+    """CLI вышла сама, и тут же попросили остановиться: ответ в папке, замер не ждём."""
+    import agent_workers.base.worker as worker_module
+    from agent_workers.base.process import Outcome
+
+    turned = []
+
+    def finished(*args, on_start, **kwargs):
+        on_start()
+        turned.append(True)
+        return Outcome(0, None)                     # вышла сама, не по остановке
+
+    monkeypatch.setattr(worker_module, "supervise", finished)
+    adapter = FakeAdapter(tmp_path, percent=[1.0, 2.0, 3.0])
+    result = worker_at(tmp_path, profile, adapter).run({"user": "ок"}, key="задача",
+                                                       stop=lambda: bool(turned))
+    assert result["after"] is None
+    assert adapter.reads == 1                       # только замер «до»
 
 
 def test_loop_hands_the_stop_signal_to_the_tick(tmp_path):

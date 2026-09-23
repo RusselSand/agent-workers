@@ -108,6 +108,20 @@ def test_refusal_threshold_outside_0_100_is_a_configuration_error(tmp_path, valu
         _ = settings.policy
 
 
+@pytest.mark.parametrize("value", ["flase", "2", "может быть"])
+def test_typo_in_spend_credits_is_a_configuration_error(tmp_path, value):
+    """Опечатка не должна молча разрешать тратить кредиты."""
+    settings = settings_at(tmp_path, f"AGENT_PROVIDER=claude\nAGENT_SPEND_CREDITS={value}")
+    with pytest.raises(ValueError, match="AGENT_SPEND_CREDITS"):
+        _ = settings.policy
+
+
+def test_spend_credits_understands_yes_and_no(tmp_path):
+    for value, expected in (("нет", False), ("0", False), ("yes", True), ("", True)):
+        settings = settings_at(tmp_path, f"AGENT_PROVIDER=claude\nAGENT_SPEND_CREDITS={value}")
+        assert settings.policy.spend_credits is expected
+
+
 def test_refusal_threshold_bounds_are_allowed(tmp_path):
     for value in ("0", "100"):
         settings = settings_at(tmp_path, f"AGENT_PROVIDER=claude\nAGENT_REFUSE_ABOVE={value}")

@@ -40,6 +40,24 @@ def test_model_and_policy_come_from_the_settings(tmp_path):
     assert worker.policy.refuse_above == 50.0
 
 
+def test_cli_path_comes_from_the_env_file_too(tmp_path, monkeypatch):
+    """AGENT_CODEX_BINARY в .env работает, а относительный путь — от каталога .env."""
+    from pathlib import Path
+
+    for name in ("AGENT_CLAUDE_BINARY", "AGENT_CODEX_BINARY"):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "codex").write_text("", encoding="utf-8")
+    (tmp_path / ".env").write_text(f"AGENT_PROVIDER=codex\n"
+                                   f"AGENT_HOME={(tmp_path / 'учётка').as_posix()}\n"
+                                   f"AGENT_CODEX_BINARY=bin/codex\n", encoding="utf-8")
+    nested = tmp_path / "где-то" / "глубже"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+    worker = build(Settings.load())
+    assert Path(worker.adapter.executable) == (tmp_path / "bin" / "codex").resolve()
+
+
 def test_unknown_provider_is_named_not_guessed(tmp_path):
     settings = settings_at(tmp_path, "AGENT_PROVIDER=gemini")
     with pytest.raises(ValueError, match="gemini"):

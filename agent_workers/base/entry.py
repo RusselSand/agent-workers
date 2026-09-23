@@ -223,12 +223,20 @@ class Entry:
         принял результат, и задачу с этим ключом он больше не выдаёт. Держать замок
         до конца удаления нельзя: на Windows открытый файл замка не удалить.
 
-        Молчать об отказе нельзя — недоснесённая папка снова всплывёт в лотке.
+        Молчать об отказе нельзя — недоснесённая папка снова всплывёт в лотке. Для этого
+        её признаки — замок и состояние — удаляются последними: сорвётся удаление на
+        середине, остаток всё ещё узнаётся как ход, а не повисает невидимым навсегда.
         """
         self.release()   # на Windows открытый файл замка не удалить
         if not self.folder.exists():
             return
-        shutil.rmtree(self.folder)
+        for path in self.folder.iterdir():
+            if path.name in (LOCK, STATE):
+                continue
+            shutil.rmtree(path) if path.is_dir() else path.unlink()
+        for name in (STATE, LOCK):
+            (self.folder / name).unlink(missing_ok=True)
+        self.folder.rmdir()
         if self.folder.exists():
             raise NotRemoved(f"Папку хода не удалось снести: {self.folder}")
 

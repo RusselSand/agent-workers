@@ -241,6 +241,24 @@ def test_snapshot_reads_our_own_session(sample, profile):
     assert adapter().snapshot(profile, session="0" * 36) is None
 
 
+def test_own_session_is_found_without_listing_the_whole_history(sample, profile,
+                                                                monkeypatch):
+    """Каждый ход — новая сессия: искать свою по всей истории значит дорожать с каждым ходом."""
+    import agent_workers.providers.codex as codex_module
+
+    session = "01a0c345-2cd1-70e2-8daa-7193e928f5d9"
+    folder = profile.home / "sessions" / "2026" / "09" / "21"
+    folder.mkdir(parents=True)
+    (folder / f"rollout-2026-09-21T11-21-25-{session}.jsonl").write_text(
+        sample("codex-rollout.jsonl"), encoding="utf-8")
+
+    def everything(home):
+        raise AssertionError("обошли всю историю сессий")
+
+    monkeypatch.setattr(codex_module, "rollouts", everything)
+    assert adapter().snapshot(profile, session=session).exact is True
+
+
 def resumed_profile(sample, profile):
     session = "01a0c3ba-6ab4-7590-8ac9-33e8fa9dacce"
     folder = profile.home / "sessions" / "2026" / "09" / "21"

@@ -10,6 +10,7 @@ token_count. Он может быть устаревшим, поэтому по�
 
 from __future__ import annotations
 
+import glob
 import json
 import logging
 from collections.abc import Mapping
@@ -116,6 +117,20 @@ def rpc_credits(result: Mapping, model: str = "") -> tuple[Decimal | None, bool]
 def rollouts(home: Path):
     """Роллауты новых сессий сверху: имя содержит дату, так что сортировки хватает."""
     return sorted((home / "sessions").rglob("rollout-*.jsonl"), reverse=True)
+
+
+def session_rollout(home: Path, session: str) -> Path | None:
+    """Роллаут сессии по её идентификатору, без обхода всей истории.
+
+    Codex раскладывает роллауты по дням: sessions/ГГГГ/ММ/ДД. Своя сессия почти всегда
+    сегодняшняя, поэтому идём от свежих дней и останавливаемся на первой находке —
+    иначе цена каждого ответа росла бы вместе со всей историей учётной записи.
+    """
+    pattern = f"rollout-*{glob.escape(session)}.jsonl"
+    for day in sorted((home / "sessions").glob("*/*/*"), reverse=True):
+        for path in day.glob(pattern):
+            return path
+    return None
 
 
 def recent_rollouts(home: Path) -> list[tuple[Path, datetime]]:
@@ -392,8 +407,7 @@ class CodexAdapter:
         может быть сколько угодно, а старше since снимок политике уже не годится.
         """
         if session:
-            match = [path for path in rollouts(profile.home) if path.stem.endswith(session)]
-            return match[0] if match else None
+            return session_rollout(profile.home, session)
         for path, modified in recent_rollouts(profile.home):
             if since is not None and modified < since:
                 break

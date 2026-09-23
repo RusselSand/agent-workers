@@ -128,8 +128,9 @@ class Worker:
         reply = self.parse(entry)
         state = "answered" if reply.complete else "incomplete"
         entry.update(state=state, diagnostic=reply.diagnostic)
-        if outcome.interruption == "stopped":
-            # Нас попросили остановиться: не задерживаем выход паузами и запусками CLI.
+        if outcome.interruption == "stopped" or (stop is not None and stop()):
+            # Нас попросили остановиться — в том числе сразу после того, как CLI вышла
+            # сама: ответ уже в папке, а замер «после» стоит минуты пауз и запусков CLI.
             return self.result(state, entry, reply, before, None)
         after = self.guard.measure("after", session=reply.session_id, model=model)
         return self.result(state, entry, reply, before, after)

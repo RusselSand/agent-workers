@@ -15,8 +15,13 @@ def build(settings: Settings | None = None) -> Worker:
     provider = settings.provider
     if provider not in ADAPTERS:
         raise ValueError(f"Провайдер {provider!r} неизвестен; есть: " + ", ".join(ADAPTERS))
-    model = settings.model
-    adapter = ADAPTERS[provider](**({"model": model} if model else {}))
+    options = {}
+    if settings.model:
+        options["model"] = settings.model
+    if executable := settings.binary(provider):
+        # Путь к CLI — из тех же настроек, что и всё остальное: .env, окружение, флаги.
+        options["executable"] = executable
+    adapter = ADAPTERS[provider](**options)
     # Имя профиля — имя каталога: так в отчётах видно ровно то, что названо в настройках.
     return Worker(adapter, Profile(settings.home.name, settings.home),
                   settings.runs, settings.policy)
