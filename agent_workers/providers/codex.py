@@ -71,15 +71,15 @@ def applicable(buckets: Mapping, model: str) -> dict:
 
     Если какая-то корзина названа под нашу модель, считаем по ней. Иначе берём общие,
     без привязки. Без этого общая корзина на 100% запретила бы ход модели, у которой
-    своя корзина пуста.
+    своя корзина пуста. Нет ни своей, ни общей — корзин для нас нет: лимит неизвестен,
+    и дальше решает политика, а не исчерпанное окно чужой модели.
     """
     named = {key: bucket for key, bucket in buckets.items()
              if bucket.get("normalModelSlug") == model}
     if named:
         return named
-    general = {key: bucket for key, bucket in buckets.items()
-               if not bucket.get("normalModelSlug")}
-    return general or dict(buckets)
+    return {key: bucket for key, bucket in buckets.items()
+            if not bucket.get("normalModelSlug")}
 
 
 def buckets_of(result: Mapping) -> dict:

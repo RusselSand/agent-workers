@@ -56,6 +56,22 @@ def test_credits_come_from_the_same_bucket_as_the_windows(sample, profile, monke
     assert guard.blocked(sol) is None                         # у общей корзины кредиты свои
 
 
+def test_buckets_of_other_models_never_limit_us(sample, profile, monkeypatch):
+    """Ни своей корзины, ни общей: чужой исчерпанный лимит не повод отказать."""
+    from agent_workers.base import Guard, LimitPolicy
+
+    result = json.loads(sample("codex-app-server.json"))
+    del result["rateLimitsByLimitId"]["codex"]                       # общей корзины нет
+    result["rateLimitsByLimitId"]["base_model_inference"]["primary"]["usedPercent"] = 100
+    assert rpc_windows(result, "gpt-5.6-новая") == ()
+
+    monkeypatch.setattr(CodexAdapter, "rate_limits", lambda self, profile: result)
+    monkeypatch.setattr(CodexAdapter, "snapshot", lambda self, profile, session=None: None)
+    limits = adapter().limits(profile, model="gpt-5.6-новая")
+    assert limits is None                                    # лимит неизвестен
+    assert Guard(adapter(), profile, LimitPolicy()).blocked(limits) is None   # решает политика
+
+
 def test_single_bucket_answer_is_supported(sample):
     result = json.loads(sample("codex-app-server.json"))
     result.pop("rateLimitsByLimitId")
