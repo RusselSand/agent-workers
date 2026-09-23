@@ -20,6 +20,30 @@ def settings_at(tmp_path, text=""):
     return Settings.load(tmp_path)
 
 
+def test_relative_paths_in_env_are_relative_to_the_env_file(tmp_path, monkeypatch):
+    """.env нашёлся выше по дереву: его пути — от него, из какого каталога ни запусти.
+    Иначе другой подкаталог — другой вход и другой лоток с невидимыми ответами."""
+    for name in ("AGENT_HOME", "AGENT_RUNS"):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / ".env").write_text("AGENT_PROVIDER=claude\nAGENT_HOME=.agent\n"
+                                   "AGENT_RUNS=outbox\n", encoding="utf-8")
+    nested = tmp_path / "backend" / "agent_workers"
+    nested.mkdir(parents=True)
+    for start in (tmp_path, nested):
+        monkeypatch.chdir(start)
+        settings = Settings.load()
+        assert settings.home == (tmp_path / ".agent").resolve()
+        assert settings.runs == (tmp_path / "outbox").resolve()
+
+
+def test_relative_paths_from_the_environment_follow_the_cwd(tmp_path, monkeypatch):
+    nested = tmp_path / "где-то"
+    nested.mkdir()
+    monkeypatch.chdir(nested)
+    monkeypatch.setenv("AGENT_HOME", "учётка")
+    assert Settings().home == (nested / "учётка").resolve()
+
+
 def test_env_file_quirks_are_survivable():
     values = parse(SAMPLE)
     assert values["AGENT_PROVIDER"] == "claude"                    # BOM, export и CRLF

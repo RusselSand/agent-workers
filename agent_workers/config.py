@@ -89,11 +89,30 @@ class Settings:
                              "в .env или флаг --provider")
         return provider
 
+    def path_of(self, key: str) -> Path | None:
+        """Путь из настроек, абсолютный, или None, если не задан.
+
+        Относительный путь из .env считается от каталога этого файла: .env ищется вверх
+        по дереву, и из какого подкаталога ни запусти, это должен быть один и тот же
+        каталог — иначе другой вход, другой лоток и оплаченные ответы, которых не видно.
+        Из окружения и флагов — от текущего каталога, как принято у путей в командах.
+        """
+        for source in (self.overrides, os.environ, self.values):
+            if key not in source:
+                continue
+            if not source[key]:
+                return None
+            named = Path(source[key])
+            if source is self.values and self.path is not None:
+                named = self.path.parent / named   # абсолютный путь это не изменит
+            return named.resolve()
+        return None
+
     @property
     def home(self) -> Path:
         """Каталог учётной записи. Вне репозитория: в нём лежат токены входа."""
-        named = self.get("AGENT_HOME")
-        return (Path(named) if named else Path.home() / ".agent-worker" / self.provider).resolve()
+        return (self.path_of("AGENT_HOME")
+                or (Path.home() / ".agent-worker" / self.provider).resolve())
 
     @property
     def model(self) -> str:
@@ -101,8 +120,7 @@ class Settings:
 
     @property
     def runs(self) -> Path:
-        named = self.get("AGENT_RUNS")
-        return (Path(named) if named else self.home / "runs").resolve()
+        return self.path_of("AGENT_RUNS") or (self.home / "runs").resolve()
 
     @property
     def policy(self) -> LimitPolicy:
