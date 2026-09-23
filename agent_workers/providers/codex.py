@@ -118,22 +118,29 @@ def rollouts(home: Path):
     return sorted((home / "sessions").rglob("rollout-*.jsonl"), reverse=True)
 
 
-def snapshot_of(text: str) -> tuple[dict | None, datetime | None]:
+def snapshot_of(text: str, model: str | None = None) -> tuple[dict | None, datetime | None]:
     """Последний непустой снимок лимитов и время, которым его пометил сам Codex.
 
     Время обязательно: снимок может быть вчерашним, и выдавать его за сейчас нельзя —
     на возрасте замера держится решение, начинать ли ход.
+
+    model — брать только снимки, снятые во время хода этой модели: у моделей бывают
+    свои корзины лимита, и снимок чужой корзины про наш ход ничего не говорит. Модель
+    хода роллаут пишет в turn_context, и в одной сессии она может меняться.
     """
-    found, when = None, None
+    found, when, current = None, None, None
     for line in text.splitlines():
-        if '"rate_limits"' not in line:
+        if '"rate_limits"' not in line and '"turn_context"' not in line:
             continue
         try:
             record = json.loads(line)
         except ValueError:
             continue
         payload = record.get("payload") or {}
-        if payload.get("type") == "token_count" and payload.get("rate_limits"):
+        if record.get("type") == "turn_context":
+            current = payload.get("model")
+        elif (payload.get("type") == "token_count" and payload.get("rate_limits")
+              and (model is None or current == model)):
             found, when = payload["rate_limits"], moment(record.get("timestamp"))
     return found, when
 
@@ -285,10 +292,10 @@ class CodexAdapter:
             result = self.rate_limits(profile)
         except Exception:
             # Протокол app-server помечен экспериментальным: его отказ — не авария.
-            return self.snapshot(profile, session=session)
+            return self.snapshot(profile, session=session, model=model)
         windows = rpc_windows(result, model)
         if not windows:
-            return self.snapshot(profile, session=session)
+            return self.snapshot(profile, session=session, model=model)
         balance, endless = rpc_credits(result, model)
         summary = result.get("rateLimits") or {}
         return Limits(self.name, profile.name, windows, datetime.now(UTC), "app-server", True,
@@ -317,12 +324,19 @@ class CodexAdapter:
             raise RuntimeError("Запрос к app-server отклонён")
         return event.get("result") or {}
 
-    def snapshot(self, profile: Profile, *, session: str | None = None) -> Limits | None:
-        """Запасной путь: те же цифры из роллаута, но, возможно, вчерашние."""
-        path = self.rollout(profile, session=session)
+    def snapshot(self, profile: Profile, *, session: str | None = None,
+                 model: str | None = None) -> Limits | None:
+        """Запасной путь: те же цифры из роллаута, но, возможно, вчерашние.
+
+        Своя сессия — снимок наш по построению. Без неё берём самый свежий роллаут, где
+        шёл ход нашей модели: снимок чужой корзины решал бы за наш ход. Такого нет —
+        лимит неизвестен, и решает политика.
+        """
+        wanted = None if session else model
+        path = self.rollout(profile, session=session, model=wanted)
         if path is None:
             return None
-        raw, when = snapshot_of(path.read_text(encoding="utf-8", errors="ignore"))
+        raw, when = snapshot_of(path.read_text(encoding="utf-8", errors="ignore"), wanted)
         windows = rollout_windows(raw) if raw else ()
         if not windows:
             return None
@@ -332,11 +346,12 @@ class CodexAdapter:
                       session is not None, plan=raw.get("plan_type"), credits=credits_of(raw),
                       credits_unlimited=unlimited(raw))
 
-    def rollout(self, profile: Profile, *, session: str | None = None) -> Path | None:
+    def rollout(self, profile: Profile, *, session: str | None = None,
+                model: str | None = None) -> Path | None:
         if session:
             match = [path for path in rollouts(profile.home) if path.stem.endswith(session)]
             return match[0] if match else None
         for path in rollouts(profile.home)[:20]:
-            if rate_limits(path.read_text(encoding="utf-8", errors="ignore")):
+            if snapshot_of(path.read_text(encoding="utf-8", errors="ignore"), model)[0]:
                 return path
         return None

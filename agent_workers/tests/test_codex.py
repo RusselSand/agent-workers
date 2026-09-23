@@ -66,10 +66,50 @@ def test_buckets_of_other_models_never_limit_us(sample, profile, monkeypatch):
     assert rpc_windows(result, "gpt-5.6-новая") == ()
 
     monkeypatch.setattr(CodexAdapter, "rate_limits", lambda self, profile: result)
-    monkeypatch.setattr(CodexAdapter, "snapshot", lambda self, profile, session=None: None)
+    monkeypatch.setattr(CodexAdapter, "snapshot",
+                        lambda self, profile, session=None, model=None: None)
     limits = adapter().limits(profile, model="gpt-5.6-новая")
     assert limits is None                                    # лимит неизвестен
     assert Guard(adapter(), profile, LimitPolicy()).blocked(limits) is None   # решает политика
+
+
+def rollout_of(folder, name, model, bucket, percent):
+    """Роллаут одной сессии: ход модели и снимок лимитов её корзины после него."""
+    turn = {"timestamp": "2026-09-23T10:00:00Z", "type": "turn_context",
+            "payload": {"model": model}}
+    count = {"timestamp": "2026-09-23T10:00:05Z", "type": "event_msg",
+             "payload": {"type": "token_count", "info": None, "rate_limits": {
+                 "limit_id": bucket, "primary": {"used_percent": percent, "window_minutes": 10080,
+                                                 "resets_at": 1790588781},
+                 "secondary": None, "credits": None, "plan_type": "prolite"}}}
+    (folder / name).write_text(json.dumps(turn) + "\n" + json.dumps(count) + "\n",
+                               encoding="utf-8")
+
+
+def test_fallback_snapshot_comes_from_a_turn_of_our_model(profile, monkeypatch):
+    """app-server недоступен: снимок чужой модели не решает за наш ход."""
+    from agent_workers.base import Guard, LimitPolicy
+
+    folder = profile.home / "sessions" / "2026" / "09" / "23"
+    folder.mkdir(parents=True)
+    rollout_of(folder, "rollout-2026-09-23T10-00-00-luna.jsonl",       # свежий, Luna выбрана
+               "gpt-5.6-luna", "base_model_inference", 100)
+    rollout_of(folder, "rollout-2026-09-22T10-00-00-sol.jsonl",        # постарше, у Sol запас
+               "gpt-5.6-sol", "codex", 10)
+
+    def unavailable(self, profile):
+        raise RuntimeError("app-server не отвечает")
+
+    monkeypatch.setattr(CodexAdapter, "rate_limits", unavailable)
+    guard = Guard(adapter(), profile, LimitPolicy(stale_after=timedelta(days=365 * 10)))
+
+    sol = adapter().limits(profile, model="gpt-5.6-sol")
+    assert [(w.name, w.used_percent) for w in sol.windows] == [("codex:primary", 10.0)]
+    assert guard.blocked(sol) is None                  # исчерпанная Luna Sol не держит
+
+    luna = adapter().limits(profile, model="gpt-5.6-luna")
+    assert guard.blocked(luna) == "Окно выбрано на 100%"
+    assert adapter().limits(profile, model="gpt-5.6-terra") is None   # своего снимка нет
 
 
 def test_single_bucket_answer_is_supported(sample):
