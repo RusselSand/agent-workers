@@ -216,17 +216,16 @@ def main(argv: list[str] | None = None) -> int:
     if not options.command:
         parser().print_help()
         return 2
-    settings = Settings.load().override(provider=options.provider, home=options.home,
-                                        model=options.model)
-    if options.command in ("pending", "collect"):
-        # Разобрать лоток можно и без CLI: она может быть снесена или сломана обновлением.
-        print(f"лоток: {settings.runs}", file=sys.stderr)
-        outbox = Outbox(settings.runs)
-        return pending(outbox) if options.command == "pending" else collect(outbox, options)
-
     try:
+        settings = Settings.load().override(provider=options.provider, home=options.home,
+                                            model=options.model)
+        if options.command in ("pending", "collect"):
+            # Разобрать лоток можно и без CLI: она может быть снесена или сломана обновлением.
+            outbox = Outbox(settings.runs)
+            print(f"лоток: {outbox.root}", file=sys.stderr)
+            return pending(outbox) if options.command == "pending" else collect(outbox, options)
         worker = build(settings)
-    except (ValueError, RuntimeError) as exc:   # нет настроек или не найдена сама CLI
+    except (ValueError, RuntimeError) as exc:   # настройки не читаются, не заданы или нет CLI
         print(exc, file=sys.stderr)
         return 2
 

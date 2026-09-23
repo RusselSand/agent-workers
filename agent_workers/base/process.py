@@ -76,6 +76,10 @@ def group_alive(pgid: int) -> bool:
     return True
 
 
+class LaunchError(OSError):
+    """CLI не запустилась: ход не начинался и ничего не стоил."""
+
+
 @dataclass(frozen=True)
 class Outcome:
     returncode: int | None
@@ -95,6 +99,19 @@ def interactive(command: Command) -> int:
     return subprocess.run(command.argv, env=dict(command.env), cwd=command.cwd).returncode
 
 
+def launch(command: Command, stdin, out, err) -> subprocess.Popen:
+    """Запуск хода своей группой процессов.
+
+    Файла нет, нет прав на запуск, система не даёт создать процесс — это LaunchError,
+    а не оборванный ход: процесс не стартовал, и платить было не за что.
+    """
+    try:
+        return subprocess.Popen(command.argv, stdin=stdin, stdout=out, stderr=err,
+                                cwd=command.cwd, env=dict(command.env), **detached())
+    except OSError as exc:
+        raise LaunchError(f"CLI не запустилась: {exc}") from exc
+
+
 def supervise(command: Command, *, stdout: Path, stderr: Path, pulse=None, stop=None,
               timeout: float = 1200, sync_every: float = 20) -> Outcome:
     """Длинный ход. Журналы только дозаписываются, чтобы обрыв не уносил уже полученное."""
@@ -106,14 +123,16 @@ def supervise(command: Command, *, stdout: Path, stderr: Path, pulse=None, stop=
     interruption = None
     try:
         with stdout.open("ab", buffering=0) as out, stderr.open("ab", buffering=0) as err:
-            process = subprocess.Popen(command.argv, stdin=stdin, stdout=out, stderr=err,
-                                       cwd=command.cwd, env=dict(command.env), **detached())
+            process = launch(command, stdin, out, err)
             started = last_sync = time.monotonic()
             try:
                 while process.poll() is None:
                     now = time.monotonic()
-                    if stop() or now - started >= timeout:
-                        interruption = "stopped" if stop() else "timeout"
+                    if stop():
+                        interruption = "stopped"
+                        break
+                    if now - started >= timeout:
+                        interruption = "timeout"
                         break
                     if now - last_sync >= sync_every:
                         os.fsync(out.fileno())

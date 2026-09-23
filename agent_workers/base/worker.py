@@ -22,7 +22,7 @@ from .contract import Adapter, Profile, Reply
 from .entry import Entry, private_dir
 from .guard import Guard, LimitPolicy
 from .outbox import Outbox
-from .process import capture, interactive, supervise
+from .process import LaunchError, capture, interactive, supervise
 
 log = logging.getLogger(__name__)
 
@@ -103,6 +103,11 @@ class Worker:
         try:
             outcome = supervise(command, stdout=entry.stdout, stderr=entry.stderr,
                                 pulse=pulse, stop=stop, timeout=self.timeout)
+        except LaunchError:
+            # CLI не стартовала: ход не начинался, и выдавать папку за оплаченную попытку
+            # нельзя. Это такой же отказ до запуска, как и все выше.
+            self.discard(entry)
+            raise
         except BaseException as exc:
             # Ctrl+C: папка обязана стать «незавершённой», а не зависнуть в «идёт».
             entry.update(state="incomplete", pid=None, diagnostic=type(exc).__name__)

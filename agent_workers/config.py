@@ -60,7 +60,14 @@ class Settings:
     @classmethod
     def load(cls, start: Path | None = None) -> Settings:
         path = find(start)
-        return cls(parse(path.read_text(encoding="utf-8")) if path else {}, path)
+        if path is None:
+            return cls({}, None)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            # Файл нашёлся, но испорчен или закрыт: это ошибка настройки, а не сбой.
+            raise ValueError(f"Файл настроек не прочитать: {path}: {exc}") from None
+        return cls(parse(text), path)
 
     def override(self, **named: str | None) -> Settings:
         """Флаги команды сильнее всего остального; пустые значения ничего не меняют."""

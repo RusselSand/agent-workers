@@ -95,6 +95,21 @@ def test_unnamed_connection_is_reported_not_guessed(capsys, monkeypatch):
     assert "AGENT_PROVIDER" in capsys.readouterr().err
 
 
+def test_unreadable_env_file_is_a_message_not_a_traceback(tmp_path, capsys):
+    """Испорченный .env не должен ронять даже команды, которым CLI не нужна."""
+    (tmp_path / ".env").write_bytes(b"AGENT_PROVIDER=\xff\xfe")
+    for command in (["pending"], ["status"]):
+        assert cli.main(command) == 2
+        assert "Файл настроек не прочитать" in capsys.readouterr().err
+
+
+def test_outbox_without_a_named_connection_is_reported_not_a_traceback(monkeypatch, capsys):
+    monkeypatch.delenv("AGENT_PROVIDER")
+    monkeypatch.delenv("AGENT_HOME")
+    assert cli.main(["pending"]) == 2
+    assert "AGENT_PROVIDER" in capsys.readouterr().err
+
+
 def test_unknown_provider_is_rejected_by_the_parser():
     with pytest.raises(SystemExit):
         cli.main(["run", "--provider", "gemini", "привет"])

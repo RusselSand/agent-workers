@@ -18,7 +18,7 @@ from agent_workers.base import (
     Window,
     Worker,
 )
-from agent_workers.base.entry import Entry, NotRemoved, folder_for
+from agent_workers.base.entry import LOCK, Entry, NotRemoved, folder_for
 
 QUIET = LimitPolicy(settle_reads=1, settle_delay=0)
 
@@ -89,7 +89,7 @@ def test_folder_lock_is_exclusive_between_processes(tmp_path):
     owner = Entry(tmp_path, "ход")
 
     def ask() -> str:
-        done = subprocess.run([sys.executable, str(probe), str(owner.folder / "owner.lock")],
+        done = subprocess.run([sys.executable, str(probe), str(owner.folder / LOCK)],
                               capture_output=True, text=True,
                               env={**os.environ, "PYTHONPATH": str(package)})
         return done.stdout.strip()
@@ -313,6 +313,21 @@ def test_interrupt_while_building_the_request_leaves_no_folder_behind(tmp_path, 
     assert worker.pending() == []
 
 
+def test_cli_that_cannot_start_leaves_no_paid_looking_folder(tmp_path, profile):
+    """Процесс не стартовал — платить было не за что, и папка не должна это изображать."""
+    from agent_workers.base.process import LaunchError
+
+    class Vanished(FakeAdapter):
+        def ask(self, entry, request, profile):
+            return Command((str(tmp_path / "удалённая-cli"),), dict(os.environ), entry.folder)
+
+    worker = worker_at(tmp_path, profile, Vanished(tmp_path))
+    with pytest.raises(LaunchError):
+        worker.run({"user": "вопрос"}, key="задача")
+    assert worker.pending() == []
+    assert not (tmp_path / "runs" / "задача").exists()
+
+
 def test_shutdown_requested_before_launch_does_not_start_a_turn(tmp_path, profile):
     adapter = FakeAdapter(tmp_path)
     result = worker_at(tmp_path, profile, adapter).run({"user": "вопрос"}, key="задача",
@@ -369,11 +384,18 @@ def test_foreign_directories_are_never_taken_for_entries(tmp_path, profile):
     sessions = tmp_path / "runs" / "sessions"
     sessions.mkdir(parents=True)
     (sessions / "токен.json").write_text("секрет", encoding="utf-8")
+    # Обычные имена файлов у чужих программ — не повод признать их папку ходом.
+    other = tmp_path / "runs" / "чужая-программа"
+    other.mkdir()
+    (other / "state.json").write_text("{}", encoding="utf-8")
+    (other / "owner.lock").write_text("", encoding="utf-8")
 
     assert worker.pending() == []
-    with pytest.raises(ValueError, match="нет"):
-        worker.collect("sessions")
+    for name in ("sessions", "чужая-программа"):
+        with pytest.raises(ValueError, match="нет"):
+            worker.collect(name)
     assert (sessions / "токен.json").exists()
+    assert (other / "state.json").exists()
 
 
 def test_broken_reply_parsing_is_an_incomplete_result_not_a_crash(tmp_path, profile):
