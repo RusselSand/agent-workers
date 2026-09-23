@@ -1,7 +1,6 @@
 """Команды работают без установленных CLI: ни один тест ничего не тратит."""
 import io
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -15,11 +14,6 @@ def connection(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_PROVIDER", "claude")
     monkeypatch.setenv("AGENT_HOME", str(tmp_path / "учётка"))
     monkeypatch.chdir(tmp_path)
-
-
-def folder_of(printed: str) -> Path:
-    """Первая строка dry-run называет каталог хода — в нём лежит всё, что уйдёт в CLI."""
-    return Path(printed.splitlines()[0].split(": ", 1)[1])
 
 
 def test_every_command_says_where_it_connects(capsys, tmp_path):
@@ -52,8 +46,7 @@ def test_system_file_reaches_the_request(tmp_path, capsys):
     instruction = tmp_path / "system.md"
     instruction.write_text("Отвечай коротко", encoding="utf-8")
     cli.main(["run", "--system-file", str(instruction), "--dry-run", "привет"])
-    written = folder_of(capsys.readouterr().out) / "invocation" / "system.md"
-    assert written.read_text(encoding="utf-8") == "Отвечай коротко"
+    assert "--- invocation/system.md\nОтвечай коротко" in capsys.readouterr().out
 
 
 def test_unreadable_system_file_is_a_message_not_a_traceback(tmp_path, capsys):
@@ -69,16 +62,19 @@ def test_unreadable_system_file_is_a_message_not_a_traceback(tmp_path, capsys):
 def test_prompt_can_come_from_stdin(monkeypatch, capsys):
     monkeypatch.setattr(sys, "stdin", io.StringIO("задание из файла"))
     cli.main(["run", "--dry-run", "-"])
-    written = folder_of(capsys.readouterr().out) / "invocation" / "input.txt"
-    assert written.read_text(encoding="utf-8") == "задание из файла"
+    assert "--- invocation/input.txt (stdin)\nзадание из файла" in capsys.readouterr().out
 
 
-def test_dry_run_leaves_nothing_in_the_runs_folder(tmp_path, capsys):
-    """Пробный ход собирается во временном каталоге: в лотке от него ничего не остаётся."""
-    cli.main(["run", "--dry-run", "привет"])
-    folder = folder_of(capsys.readouterr().out)
+def test_dry_run_leaves_nothing_behind(tmp_path, monkeypatch):
+    """Ни в лотке, ни во временном каталоге тексты заданий не копятся."""
+    import tempfile
+
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    assert cli.main(["run", "--dry-run", "привет"]) == 0
+    assert not any(scratch.iterdir())
     runs = tmp_path / "учётка" / "runs"
-    assert runs not in folder.parents
     assert not runs.exists() or not any(runs.iterdir())
 
 

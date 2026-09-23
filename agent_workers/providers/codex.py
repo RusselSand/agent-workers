@@ -153,6 +153,14 @@ def last_usage(text: str) -> dict | None:
     return found
 
 
+def verdict(complete: bool, text: str) -> str | None:
+    """Почему ход — не ответ: не дошёл до конца или дошёл, но без текста.
+    Молчать нельзя: иначе координатор получит неудачу без причины."""
+    if not complete:
+        return "no_terminal_event"
+    return None if text else "empty_result"
+
+
 def rollout_windows(raw: Mapping) -> tuple[Window, ...]:
     buckets = {str(raw.get("limit_id") or "codex"): raw}
     return tuple(bucket_windows(buckets, used="used_percent",
@@ -222,7 +230,7 @@ class CodexAdapter:
         text = entry.read("summary.txt") or message
         done = complete and bool(text)
         usage = self.turn_usage(profile, session) or usage
-        return Reply(text, session, done, None if complete else "no_terminal_event", usage,
+        return Reply(text, session, done, verdict(complete, text), usage,
                      tokens_of(usage), entry.meta.get("model") or self.model)
 
     def turn_usage(self, profile: Profile, session: str | None) -> dict | None:

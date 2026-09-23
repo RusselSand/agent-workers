@@ -72,6 +72,16 @@ def test_summary_file_outranks_streamed_message(sample, profile, tmp_path):
     assert adapter().reply(entry, profile).text == "итоговый ответ"
 
 
+def test_completed_turn_without_text_says_so(profile, tmp_path):
+    """Ход дошёл до конца, но ответа нет: неудача должна быть названа, а не безымянна."""
+    entry = Entry(tmp_path, "run")
+    entry.write("stdout.jsonl", '{"type": "thread.started", "thread_id": "t"}\n'
+                                '{"type": "turn.completed", "usage": {"input_tokens": 5}}')
+    reply = adapter().reply(entry, profile)
+    assert reply.complete is False
+    assert reply.diagnostic == "empty_result"
+
+
 def test_every_turn_starts_a_new_session(tmp_path, profile):
     """Ход — вопрос и ответ: продолжать чужую беседу не из чего и незачем."""
     command = adapter().ask(Entry(tmp_path, "run"), {"user": "x", "session": "старая"}, profile)

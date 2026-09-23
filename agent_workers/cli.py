@@ -138,12 +138,17 @@ def run(worker: Worker, options) -> int:
 
 
 def dry_run(worker: Worker, request: dict) -> int:
-    """Пробный ход собирается во временном каталоге: папка ходов остаётся нетронутой."""
-    entry = Entry(Path(tempfile.mkdtemp(prefix="agent-dry-run-")), "ход")
-    command = worker.adapter.ask(entry, request, worker.profile)
-    print(f"каталог хода: {entry.folder}")
-    print("команда:", " ".join(command.argv))
-    print(f"stdin: {command.stdin}")
+    """Пробный ход собирается во временном каталоге и исчезает вместе с ним: ни папка
+    ходов, ни диск не копят тексты заданий. Поэтому файлы печатаются, а не их пути."""
+    with tempfile.TemporaryDirectory(prefix="agent-dry-run-") as scratch:
+        entry = Entry(Path(scratch), "ход")
+        command = worker.adapter.ask(entry, request, worker.profile)
+        print("команда:", " ".join(command.argv))
+        for path in sorted(entry.folder.rglob("*")):
+            if path.is_file() and path != entry.state_path:
+                mark = " (stdin)" if path == command.stdin else ""
+                print(f"\n--- {path.relative_to(entry.folder).as_posix()}{mark}")
+                print(path.read_text(encoding="utf-8"))
     print()
     print("Ничего не запущено и не потрачено.")
     return 0
