@@ -112,14 +112,13 @@ def launch(command: Command, stdin, out, err) -> subprocess.Popen:
         raise LaunchError(f"CLI не запустилась: {exc}") from exc
 
 
-def supervise(command: Command, *, stdout: Path, stderr: Path, pulse=None, stop=None,
+def supervise(command: Command, *, stdout: Path, stderr: Path, stop=None,
               on_start=None, timeout: float = 1200, sync_every: float = 20) -> Outcome:
     """Длинный ход. Журналы только дозаписываются, чтобы обрыв не уносил уже полученное.
 
     on_start зовётся ровно тогда, когда процесс уже запущен: всё, что сломалось раньше, —
     журналы, stdin, сам запуск — случилось до хода, и платить там было не за что.
     """
-    pulse = pulse or (lambda: None)
     stop = stop or (lambda: False)
     on_start = on_start or (lambda: None)
     for journal in (stdout, stderr):
@@ -143,7 +142,6 @@ def supervise(command: Command, *, stdout: Path, stderr: Path, pulse=None, stop=
                     if now - last_sync >= sync_every:
                         os.fsync(out.fileno())
                         os.fsync(err.fileno())
-                        pulse()
                         last_sync = now
                     time.sleep(0.2)
             finally:

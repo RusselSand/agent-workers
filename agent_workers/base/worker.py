@@ -51,7 +51,9 @@ class Worker:
         return interactive(self.adapter.logout(self.profile))
 
     def run(self, request: Mapping[str, object], *, key: str,
-            pulse=None, stop=None, ensure_login: bool = False) -> dict:
+            stop=None, ensure_login: bool = False) -> dict:
+        """Аренду задачи здесь не продлевают: это забота того, кто взял задачу у
+        координатора, — на всё время обработки, а не только пока идёт CLI."""
         entry = Entry(self.root, key)
         if not entry.claim():
             # Папкой владеет живой процесс: второй вызов оплатил бы ту же работу.
@@ -61,13 +63,12 @@ class Worker:
             done = self.finished(entry)
             if done is not None:
                 return done
-            return self.attempt(entry, request, pulse=pulse, stop=stop,
-                                ensure_login=ensure_login)
+            return self.attempt(entry, request, stop=stop, ensure_login=ensure_login)
         finally:
             entry.release()
 
     def attempt(self, entry: Entry, request: Mapping[str, object], *,
-                pulse=None, stop=None, ensure_login: bool = False) -> dict:
+                stop=None, ensure_login: bool = False) -> dict:
         """Готового ответа в папке нет — ход делается заново.
 
         Что бы там ни лежало — ничего или след оборванной попытки, — задачу выдали
@@ -110,7 +111,7 @@ class Worker:
 
         try:
             outcome = supervise(command, stdout=entry.stdout, stderr=entry.stderr,
-                                pulse=pulse, stop=stop, on_start=running,
+                                stop=stop, on_start=running,
                                 timeout=self.timeout)
         except BaseException as exc:
             if not launched:
