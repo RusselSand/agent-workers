@@ -76,6 +76,27 @@ def test_policy_comes_from_the_same_file(tmp_path):
     assert settings_at(tmp_path, "AGENT_PROVIDER=claude").policy.refuse_above == 95.0
 
 
+@pytest.mark.parametrize("value", ["nan", "inf", "-1", "101", "abc"])
+def test_refusal_threshold_outside_0_100_is_a_configuration_error(tmp_path, value):
+    """nan и отрицательные запретили бы всё, inf и больше 100 молча сняли бы отказ."""
+    settings = settings_at(tmp_path, f"AGENT_PROVIDER=claude\nAGENT_REFUSE_ABOVE={value}")
+    with pytest.raises(ValueError, match="AGENT_REFUSE_ABOVE"):
+        _ = settings.policy
+
+
+def test_refusal_threshold_bounds_are_allowed(tmp_path):
+    for value in ("0", "100"):
+        settings = settings_at(tmp_path, f"AGENT_PROVIDER=claude\nAGENT_REFUSE_ABOVE={value}")
+        assert settings.policy.refuse_above == float(value)
+
+
+def test_policy_built_in_code_is_checked_too():
+    from agent_workers.base import LimitPolicy
+
+    with pytest.raises(ValueError, match="от 0 до 100"):
+        LimitPolicy(refuse_above=float("nan"))
+
+
 def test_empty_value_means_off_not_default(tmp_path):
     """`AGENT_REFUSE_ABOVE=` в файле снимает порог, а не возвращает умолчание."""
     settings = settings_at(tmp_path, "AGENT_PROVIDER=claude" "\n" "AGENT_REFUSE_ABOVE=")

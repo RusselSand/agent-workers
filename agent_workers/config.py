@@ -107,5 +107,10 @@ class Settings:
     @property
     def policy(self) -> LimitPolicy:
         refuse = self.get("AGENT_REFUSE_ABOVE", "95").strip()
-        return LimitPolicy(refuse_above=float(refuse) if refuse else None,
-                           spend_credits=self.get("AGENT_SPEND_CREDITS", "1").lower() not in NO)
+        try:
+            return LimitPolicy(refuse_above=float(refuse) if refuse else None,
+                               spend_credits=self.get("AGENT_SPEND_CREDITS", "1").lower()
+                               not in NO)
+        except ValueError:
+            raise ValueError(f"AGENT_REFUSE_ABOVE — процент от 0 до 100, а пустое значение "
+                             f"снимает порог; сейчас: {refuse!r}") from None

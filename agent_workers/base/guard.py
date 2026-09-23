@@ -30,6 +30,13 @@ class LimitPolicy:
     settle_reads: int = 2
     settle_delay: float = 2.0
 
+    def __post_init__(self) -> None:
+        # Порог вне 0–100 молча меняет расход подписки: nan и отрицательные запрещают всё,
+        # inf и больше 100 выключают отказ. Выключают его явно — через None.
+        limit = self.refuse_above
+        if limit is not None and (isinstance(limit, bool) or not 0 <= limit <= 100):
+            raise ValueError(f"Порог отказа — процент от 0 до 100 или None: {limit!r}")
+
 
 @dataclass
 class Guard:
