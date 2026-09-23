@@ -680,6 +680,49 @@ def test_stubborn_grandchild_is_killed_after_the_leader_exits(tmp_path):
     assert gone(grandchild), "упрямый внук пережил снятие хода"
 
 
+FAKE_CLAUDE = """#!/bin/sh
+case "$*" in
+  *"auth status"*)
+    echo '{"loggedIn": true, "authMethod": "claude.ai", "subscriptionType": "max"}' ;;
+  *--system-prompt-file*) echo $$ > "PID_FILE"; exec sleep 60 ;;
+  *) exit 1 ;;
+esac
+"""
+
+
+@POSIX_ONLY
+def test_sigterm_to_the_command_takes_the_provider_down_too(tmp_path):
+    """`kill` команды посреди хода не должен оставлять CLI провайдера тратить подписку."""
+    import signal
+    import subprocess
+    import time
+
+    pid_file = tmp_path / "turn.pid"
+    fake = tmp_path / "claude"
+    fake.write_text(FAKE_CLAUDE.replace("PID_FILE", str(pid_file)), encoding="utf-8")
+    fake.chmod(0o755)
+    package = Path(__file__).resolve().parents[2]
+    env = {**os.environ, "PYTHONPATH": str(package), "AGENT_PROVIDER": "claude",
+           "AGENT_HOME": str(tmp_path / "учётка"), "AGENT_CLAUDE_BINARY": str(fake)}
+    command = subprocess.Popen([sys.executable, "-m", "agent_workers", "run", "привет"],
+                               cwd=tmp_path, env=env,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(100):                      # ждём, пока ход провайдера начнётся
+            if pid_file.is_file() and pid_file.read_text(encoding="utf-8").strip():
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("ход провайдера так и не начался")
+        turn = int(pid_file.read_text(encoding="utf-8"))
+        command.send_signal(signal.SIGTERM)
+        command.wait(timeout=15)
+    finally:
+        if command.poll() is None:
+            command.kill()
+    assert gone(turn), "CLI провайдера пережила остановку команды"
+
+
 @POSIX_ONLY
 def test_background_grandchild_is_reaped_after_a_normal_exit(tmp_path):
     """CLI вышла сама, а её фоновый потомок остался: после хода в группе никого нет."""

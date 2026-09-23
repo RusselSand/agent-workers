@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -110,7 +112,8 @@ def run(worker: Worker, options) -> int:
         return dry_run(worker, request)
     try:
         # У ручного хода нет задачи от координатора: каждый запуск — новый ход.
-        result = worker.run(request, key=uuid4().hex, ensure_login=True)
+        with sigterm_as_interrupt():
+            result = worker.run(request, key=uuid4().hex, ensure_login=True)
     except ValueError as exc:
         print(f"запрос отклонён: {exc}", file=sys.stderr)
         return 2
@@ -135,6 +138,18 @@ def run(worker: Worker, options) -> int:
     print(f"убрать: python -m agent_workers collect {result['entry'].folder.name}",
           file=sys.stderr)
     return 4
+
+
+@contextmanager
+def sigterm_as_interrupt():
+    """SIGTERM на время хода — как Ctrl+C: тогда сработает уборка и CLI провайдера
+    будет снята. Иначе Python выйдет молча, а CLI в своей сессии доживёт ход без нас
+    и потратит подписку."""
+    previous = signal.signal(signal.SIGTERM, signal.default_int_handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def dry_run(worker: Worker, request: dict) -> int:
