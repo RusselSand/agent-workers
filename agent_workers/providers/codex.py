@@ -11,6 +11,7 @@ token_count. Он может быть устаревшим, поэтому по�
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -22,6 +23,8 @@ from ..base.channel import Channel
 from ..base.contract import Command, Cost, Limits, Profile, Rates, Reply, Usage, Window
 from . import common
 from .common import count, decimal, moment, number
+
+log = logging.getLogger(__name__)
 
 ENV_HOME = "CODEX_HOME"
 
@@ -258,10 +261,17 @@ class CodexAdapter:
                      tokens_of(usage), entry.meta.get("model") or self.model)
 
     def turn_usage(self, profile: Profile, session: str | None) -> dict | None:
-        path = self.rollout(profile, session=session) if session else None
-        if path is None:
+        """Расход хода из роллаута сессии. Это справка к ответу: роллаут пропал или не
+        читается — берём расход из потока, а не теряем уже полученный и оплаченный ответ."""
+        if not session:
             return None
-        return last_usage(path.read_text(encoding="utf-8", errors="ignore"))
+        try:
+            path = self.rollout(profile, session=session)
+            return last_usage(path.read_text(encoding="utf-8", errors="ignore")) if path else None
+        except OSError as exc:
+            log.warning("Роллаут сессии %s не прочитать, расход берём из потока: %s",
+                        session, type(exc).__name__)
+            return None
 
     def price(self, reply: Reply) -> Cost | None:
         """Своей цены Codex не сообщает — считаем по таблице."""

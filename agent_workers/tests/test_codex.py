@@ -101,6 +101,18 @@ def test_completed_turn_is_the_answer(sample, profile, tmp_path):
     assert reply.usage["input_tokens"] == 18827
 
 
+def test_unreadable_rollout_does_not_cost_the_answer(sample, profile, tmp_path, monkeypatch):
+    """Роллаут нашёлся, но исчез до чтения: ответ остаётся, расход — из потока."""
+    entry = Entry(tmp_path, "run")
+    entry.write("stdout.jsonl", sample("codex-exec.jsonl"))
+    monkeypatch.setattr(CodexAdapter, "rollout",
+                        lambda self, profile, session=None: tmp_path / "исчезнувший.jsonl")
+    reply = adapter().reply(entry, profile)
+    assert reply.complete is True
+    assert reply.text == "ok"
+    assert reply.usage["input_tokens"] == 18827
+
+
 def test_summary_file_outranks_streamed_message(sample, profile, tmp_path):
     entry = Entry(tmp_path, "run")
     entry.write("stdout.jsonl", sample("codex-exec.jsonl"))
