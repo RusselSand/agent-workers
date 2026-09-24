@@ -27,6 +27,11 @@ from .process import capture, interactive, supervise
 log = logging.getLogger(__name__)
 
 
+class LoginRequired(RuntimeError):
+    """Вход в подписку не подтвердился: ход не начинался, и следующий не начнётся тоже,
+    пока вход не починят снаружи."""
+
+
 @dataclass
 class Worker:
     adapter: Adapter
@@ -143,7 +148,7 @@ class Worker:
             try:
                 self.check()
             except Exception as exc:
-                raise RuntimeError(f"вход не подтверждён: {exc}") from exc
+                raise LoginRequired(f"вход не подтверждён: {exc}") from exc
             if stopping():
                 return aborted(), None
         before = self.guard.measure("before", model=model)

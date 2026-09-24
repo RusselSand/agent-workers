@@ -13,6 +13,7 @@ from agent_workers.base import (
     Guard,
     LimitPolicy,
     Limits,
+    LoginRequired,
     Reply,
     Usage,
     Window,
@@ -220,7 +221,7 @@ def test_cached_reply_is_served_even_when_login_cannot_be_checked(tmp_path, prof
     worker.run({"user": "привет"}, key="задача")                        # ответ уже в лотке
     served = worker.run({"user": "привет"}, key="задача", ensure_login=True)
     assert served["state"] == "resumed"                                 # вход не понадобился
-    with pytest.raises(RuntimeError, match="вход не подтверждён"):
+    with pytest.raises(LoginRequired, match="вход не подтверждён"):
         worker.run({"user": "новый вопрос"}, key="другая", ensure_login=True)   # а тут нужен
 
 
