@@ -1,0 +1,46 @@
+# Tests, ruff, then SonarQube Cloud analysis (organization russelsand, project
+# RusselSand_agent-workers). Runs on pull requests and on main; Sonar posts the quality gate
+# to the PR itself. Needs the SONAR_TOKEN repository secret, and Automatic Analysis turned off
+# in the project (Administration > Analysis Method): Sonar refuses both at once.
+name: Tests and Sonar
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  tests-and-sonar:
+    runs-on: ubuntu-latest
+    env:
+      # Only whether the token exists, never the token itself: the test step runs Python from
+      # the PR branch. The flag is false on PRs from forks and from Dependabot, which GitHub
+      # gives no repository secrets; Sonar is skipped there, tests still run.
+      HAS_SONAR_TOKEN: ${{ secrets.SONAR_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # full history: Sonar needs it for blame and for the new-code period
+
+      # Python from .python-version (3.14). Linux is where the process-group and file-mode
+      # tests run: on Windows they are skipped.
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Tests with coverage
+        run: uv run pytest --cov --cov-report=xml
+
+      - name: Ruff
+        run: uv run ruff check .
+
+      - name: SonarQube Cloud
+        if: env.HAS_SONAR_TOKEN == 'true'
+        uses: SonarSource/sonarqube-scan-action@v7
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}  # this step only
+        with:
+          # Wait for the quality gate and fail the job when it fails.
+          args: -Dsonar.qualitygate.wait=true

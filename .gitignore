@@ -1,0 +1,24 @@
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# The agent connection: AGENT_HOME holds login tokens, keep it outside the repo
+.env
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Sonar / coverage
+coverage.xml
+.coverage
+.scannerwork/

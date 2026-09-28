@@ -1,7 +1,9 @@
 """База не должна знать о провайдерах: иначе шов перестаёт быть швом."""
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parents[1] / "base"
+import agent_workers
+
+BASE = Path(agent_workers.__file__).resolve().parent / "base"
 
 
 def test_base_does_not_mention_providers():

@@ -1,0 +1,35 @@
+[project]
+name = "agent-workers"
+version = "0.1.0"
+description = "One turn of a subscription CLI (Claude Code, Codex): login, subscription spend before and after, API price estimate, an outbox of paid answers"
+requires-python = ">=3.14"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agent_workers"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+# Relative paths so coverage.xml resolves inside the Sonar scanner container (/usr/src).
+relative_files = true
+source = ["agent_workers"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

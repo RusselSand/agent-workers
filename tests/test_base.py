@@ -1,72 +1,23 @@
 """База проверяется на поддельном адаптере: ни одной настоящей CLI здесь нет."""
 import os
 import sys
-from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+import agent_workers
 from agent_workers.base import (
     Command,
-    Cost,
     Guard,
     LimitPolicy,
     Limits,
     LoginRequired,
-    Reply,
-    Usage,
     Window,
     Worker,
 )
 from agent_workers.base.entry import LOCK, Entry, NotRemoved, folder_for
-
-QUIET = LimitPolicy(settle_reads=1, settle_delay=0)
-
-
-def limits(percent, *, exact=True, measured_at=None):
-    return Limits("fake", "test", (Window("window", percent),),
-                  measured_at or datetime.now(UTC), "test", exact)
-
-
-@dataclass
-class FakeAdapter:
-    """Отвечает эхом через отдельный процесс и отдаёт заранее заданные замеры."""
-
-    root: Path
-    name = "fake"
-    percent: list = field(default_factory=lambda: [10.0, 12.5])
-    asked: list = field(default_factory=list)
-    reads: int = 0
-
-    def environment(self, profile):
-        return dict(os.environ)
-
-    def check(self, profile):
-        return Command((sys.executable, "-c", "print('ok')"), dict(os.environ), self.root)
-
-    def verify(self, captured):
-        if "ok" not in captured:
-            raise RuntimeError("нет входа")
-
-    def ask(self, entry, request, profile):
-        self.asked.append(request)
-        # Пишем байтами: консольная кодировка Windows не переварила бы кириллицу.
-        script = f"import sys; sys.stdout.buffer.write({request['user']!r}.encode('utf-8'))"
-        return Command((sys.executable, "-c", script), dict(os.environ), entry.folder)
-
-    def reply(self, entry, profile):
-        text = entry.read("stdout.jsonl")
-        return Reply(text, "session-1", bool(text), None, {"tokens": len(text)},
-                     Usage(input=len(text), output=1), "fake-model")
-
-    def price(self, reply):
-        from decimal import Decimal
-        return Cost(Decimal("0.01"), "USD", "table")
-
-    def limits(self, profile, *, session=None, model=None, fresh_within=None):
-        self.reads += 1
-        return limits(self.percent.pop(0) if self.percent else 0.0)
+from agent_workers.testing import QUIET, FakeAdapter, limits
 
 
 def worker_at(tmp_path, profile, adapter=None, policy=QUIET):
@@ -86,7 +37,7 @@ def test_folder_lock_is_exclusive_between_processes(tmp_path):
     import subprocess
 
     probe = Path(__file__).with_name("probe_lock.py")
-    package = Path(__file__).resolve().parents[2]
+    package = Path(agent_workers.__file__).resolve().parents[1]
     owner = Entry(tmp_path, "ход")
 
     def ask() -> str:
@@ -881,7 +832,7 @@ def test_sigterm_to_the_command_takes_the_provider_down_too(tmp_path):
     fake = tmp_path / "claude"
     fake.write_text(FAKE_CLAUDE.replace("PID_FILE", str(pid_file)), encoding="utf-8")
     fake.chmod(0o755)
-    package = Path(__file__).resolve().parents[2]
+    package = Path(agent_workers.__file__).resolve().parents[1]
     env = {**os.environ, "PYTHONPATH": str(package), "AGENT_PROVIDER": "claude",
            "AGENT_HOME": str(tmp_path / "учётка"), "AGENT_CLAUDE_BINARY": str(fake)}
     command = subprocess.Popen([sys.executable, "-m", "agent_workers", "run", "привет"],
