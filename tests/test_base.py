@@ -861,3 +861,28 @@ def test_background_grandchild_is_reaped_after_a_normal_exit(tmp_path):
     assert outcome.interruption is None
     assert outcome.returncode == 0
     assert gone(grandchild), "фоновый внук пережил ход"   # сам он спит минуту
+
+
+def test_a_bad_workspace_is_refused_before_login_and_limit_probes(tmp_path, profile):
+    """Негодный запрос — ошибка запроса, а не «нет входа» и не «лимит»: проверки входа и замеры
+    до хода с таким запросом незачем, а координатор не должен повторять его до смены учётки."""
+    class LoggedOut(FakeAdapter):
+        def verify(self, captured):
+            raise RuntimeError("выхода из учётной записи")
+
+    adapter = LoggedOut(tmp_path)
+    worker = worker_at(tmp_path, profile, adapter, LimitPolicy())
+    request = {"user": "вопрос", "workspace": str(tmp_path / "нет")}
+    with pytest.raises(ValueError, match="workspace"):
+        worker.run(request, key="задача", ensure_login=True)
+    assert adapter.reads == 0 and adapter.asked == []
+    assert not any((tmp_path / "runs").iterdir())
+
+
+def test_the_adapter_gets_the_workspace_resolved(tmp_path, profile):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    adapter = FakeAdapter(tmp_path)
+    worker_at(tmp_path, profile, adapter).run(
+        {"user": "вопрос", "workspace": f"{repo}/../repo"}, key="задача")
+    assert adapter.asked[0]["workspace"] == str(repo.resolve())

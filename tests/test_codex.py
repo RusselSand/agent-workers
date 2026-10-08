@@ -367,4 +367,5 @@ def test_without_a_workspace_the_sandbox_is_as_configured(tmp_path, profile):
     entry = Entry(tmp_path, "run")
     command = writing.ask(entry, {"user": "x"}, profile)
     assert command.argv[command.argv.index("-s") + 1] == "workspace-write"
-    assert "-C" not in command.argv and command.cwd == entry.folder
+    assert "-C" not in command.argv
+    assert command.cwd == entry.folder

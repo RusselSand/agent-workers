@@ -203,6 +203,7 @@ def test_a_workspace_is_read_only_and_ignores_its_own_settings(profile, tmp_path
 
 
 def test_a_workspace_that_is_not_a_folder_is_a_bad_request(profile, tmp_path):
+    claude, entry = adapter(), Entry(tmp_path, "run")
+    request = {"user": "x", "workspace": str(tmp_path / "нет")}
     with pytest.raises(ValueError, match="workspace"):
-        adapter().ask(Entry(tmp_path, "run"), {"user": "x", "workspace": str(tmp_path / "нет")},
-                      profile)
+        claude.ask(entry, request, profile)

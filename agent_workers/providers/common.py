@@ -15,6 +15,7 @@ from pathlib import Path
 from ..base.contract import Cost, Profile, Rates, Reply
 from ..base.entry import private_dir
 from ..base.pricing import estimate
+from ..base.worker import workspace  # noqa: F401 — провайдеры берут каталог хода отсюда
 
 # Ключи проекта в подпроцесс не уезжают: пропускаем то, без чего CLI не живёт,
 # и то, без чего она не выйдет в сеть — прокси и корпоративные сертификаты.
@@ -39,19 +40,6 @@ def find_executable(explicit: str | None, variable: str, *names: str) -> str:
     # Абсолютный путь: подпроцессы стартуют из разных каталогов, и относительный
     # путь вроде ./bin/claude там уже никуда не ведёт.
     return str(Path(found).resolve())
-
-
-def workspace(request: Mapping[str, object]) -> Path | None:
-    """Каталог, который модель читает в этом ходе: request["workspace"]. Нет — ход без файлов.
-    Есть, но это не каталог, — ошибка запроса: ход без нужных файлов ответил бы ни о чём, а
-    деньги взял бы."""
-    value = request.get("workspace")
-    if value is None or value == "":
-        return None
-    path = Path(str(value)).resolve()
-    if not path.is_dir():
-        raise ValueError(f"workspace — не каталог: {path}")
-    return path
 
 
 def environment(profile: Profile, home_variable: str, extra: set[str] = frozenset()) -> dict:

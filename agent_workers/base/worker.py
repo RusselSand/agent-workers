@@ -32,6 +32,25 @@ class LoginRequired(RuntimeError):
     пока вход не починят снаружи."""
 
 
+
+def workspace(request: Mapping[str, object]) -> Path | None:
+    """Каталог, который модель читает в этом ходе: request["workspace"]. Нет — ход без файлов.
+    Есть, но это не каталог, — ошибка запроса: ход без нужных файлов ответил бы ни о чём, а
+    деньги взял бы."""
+    value = request.get("workspace")
+    if value is None or value == "":
+        return None
+    path = Path(str(value)).resolve()
+    if not path.is_dir():
+        raise ValueError(f"workspace — не каталог: {path}")
+    return path
+
+
+def with_workspace(request: Mapping[str, object]) -> Mapping[str, object]:
+    """Запрос с проверенным каталогом: провайдер получает уже полный путь."""
+    place = workspace(request)
+    return {**request, "workspace": str(place)} if place else request
+
 @dataclass
 class Worker:
     adapter: Adapter
@@ -81,6 +100,9 @@ class Worker:
         """
         model = str(request.get("model") or getattr(self.adapter, "model", "") or "")
         try:
+            # Негодный запрос — ошибка запроса до проверок входа и замеров: с ним ход всё равно
+            # не начнётся, а «нет входа» или «лимит» вместо неё заставили бы повторять его зря.
+            request = with_workspace(request)
             refusal, before = self.preflight(entry, model, stop=stop, ensure_login=ensure_login)
             if refusal is not None:
                 return refusal
