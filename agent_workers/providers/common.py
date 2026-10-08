@@ -15,6 +15,7 @@ from pathlib import Path
 from ..base.contract import Cost, Profile, Rates, Reply
 from ..base.entry import private_dir
 from ..base.pricing import estimate
+from ..base.worker import workspace  # noqa: F401 — провайдеры берут каталог хода отсюда
 
 # Ключи проекта в подпроцесс не уезжают: пропускаем то, без чего CLI не живёт,
 # и то, без чего она не выйдет в сеть — прокси и корпоративные сертификаты.

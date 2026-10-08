@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import PurePath
 from typing import ClassVar
 
 from ..base.channel import Channel
@@ -223,6 +224,20 @@ def terminal_usage(terminal: Mapping) -> dict:
             "modelUsage": terminal.get("modelUsage") or {}}
 
 
+# Инструменты хода с каталогом: только чтение и поиск. Ни Bash, ни правок — в чужом каталоге
+# модель ничего не запускает и не меняет.
+READ_ONLY = "Read,Grep,Glob"
+
+
+def absolute_rule(path: PurePath) -> str:
+    """Абсолютный путь в правиле разрешений Claude Code: //путь от корня, на Windows —
+    //c/путь (буква диска без двоеточия)."""
+    posix = path.as_posix()
+    if len(posix) > 1 and posix[1] == ":":
+        posix = "/" + posix[0].lower() + posix[2:]
+    return "/" + posix if posix.startswith("/") else "//" + posix
+
+
 @dataclass
 class ClaudeAdapter:
     executable: str | None = None
@@ -267,10 +282,20 @@ class ClaudeAdapter:
         # а разбор всё равно читает только целые сообщения и итог.
         # Ход — вопрос и ответ, продолжать его никто не будет: беседу не сохраняем,
         # иначе каталог учётной записи рос бы с каждым ходом.
+        # С каталогом ход идёт в нём, и модель может его читать — только читать. Настройки
+        # и хуки из .claude этого каталога не грузятся (--setting-sources user): чужой
+        # репозиторий не должен ничего запускать и разрешать сам себе. Каталог учётной записи
+        # (токены входа) — под запретом чтения. Это не граница ОС: Read видит и файлы вне
+        # каталога, а запреты по абсолютным путям в Claude Code пока ненадёжны, — так что
+        # workspace — только доверенный каталог, см. README.
+        place = common.workspace(request)
+        tools = (("--tools", READ_ONLY, "--allowedTools", READ_ONLY, "--setting-sources", "user",
+                  "--disallowedTools", f"Read({absolute_rule(profile.home)}/**)")
+                 if place else ("--tools", ""))
         argv = (self.executable, "-p", "--output-format", "stream-json", "--verbose",
-                "--model", model, "--tools", "", "--strict-mcp-config", "--mcp-config", MCP_OFF,
+                "--model", model, *tools, "--strict-mcp-config", "--mcp-config", MCP_OFF,
                 "--system-prompt-file", str(system), "--no-session-persistence")
-        return Command(argv, self.environment(profile), entry.folder, stdin)
+        return Command(argv, self.environment(profile), place or entry.folder, stdin)
 
     def reply(self, entry, profile: Profile) -> Reply:
         streamed, terminal, session = read_stream(entry.read("stdout.jsonl"))
