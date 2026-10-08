@@ -875,7 +875,8 @@ def test_a_bad_workspace_is_refused_before_login_and_limit_probes(tmp_path, prof
     request = {"user": "вопрос", "workspace": str(tmp_path / "нет")}
     with pytest.raises(ValueError, match="workspace"):
         worker.run(request, key="задача", ensure_login=True)
-    assert adapter.reads == 0 and adapter.asked == []
+    assert adapter.reads == 0
+    assert adapter.asked == []
     assert not any((tmp_path / "runs").iterdir())
 
 
