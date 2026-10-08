@@ -1,11 +1,13 @@
 import json
 from datetime import datetime, timedelta
+from pathlib import PurePosixPath, PureWindowsPath
 
 import pytest
 
 from agent_workers.base import Entry
 from agent_workers.providers.claude import (
     ClaudeAdapter,
+    absolute_rule,
     concerns,
     control_windows,
     usage_windows,
@@ -207,3 +209,21 @@ def test_a_workspace_that_is_not_a_folder_is_a_bad_request(profile, tmp_path):
     request = {"user": "x", "workspace": str(tmp_path / "нет")}
     with pytest.raises(ValueError, match="workspace"):
         claude.ask(entry, request, profile)
+
+
+def test_a_workspace_turn_is_told_not_to_read_its_own_account(profile, tmp_path):
+    """Каталог учётной записи — токены входа: модели, читающей чужой репозиторий, туда незачем."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    argv = adapter().ask(Entry(tmp_path, "run"), {"user": "x", "workspace": str(repo)}, profile).argv
+    denied = argv[argv.index("--disallowedTools") + 1]
+    assert denied == f"Read({absolute_rule(profile.home)}/**)"
+    assert denied.startswith("Read(//")
+
+
+@pytest.mark.parametrize(("path", "rule"), [
+    ("/data/accounts/fable", "//data/accounts/fable"),
+    ("C:/Users/me/.accounts/fable", "//c/Users/me/.accounts/fable"),
+])
+def test_an_absolute_path_becomes_a_claude_permission_rule(path, rule):
+    assert absolute_rule(PurePosixPath(path) if path.startswith("/") else PureWindowsPath(path)) == rule
