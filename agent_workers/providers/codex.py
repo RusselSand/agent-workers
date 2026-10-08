@@ -300,12 +300,17 @@ class CodexAdapter:
         stdin = entry.write("invocation/prompt.txt", prompt)
         model = str(request.get("model") or self.model)
         entry.update(model=model)   # в ответе Codex модели нет, помним её с момента запроса
-        argv = (self.executable, "-a", "never", "exec", "-s", self.sandbox,
+        # С каталогом ход идёт в нём (-C), и песочница — только чтение, какой бы ни была в
+        # настройках: чужой каталог модель читает, но не меняет.
+        place = common.workspace(request)
+        sandbox = "read-only" if place else self.sandbox
+        argv = (self.executable, "-a", "never", "exec", "-s", sandbox,
+                *(("-C", str(place)) if place else ()),
                 "--ignore-user-config", "--skip-git-repo-check",
                 "-m", model, "--json",
                 "-o", str(entry.folder / "summary.txt"),
                 "-c", f'model_reasoning_effort="{self.effort}"', "-")
-        return Command(argv, self.environment(profile), entry.folder, stdin)
+        return Command(argv, self.environment(profile), place or entry.folder, stdin)
 
     def reply(self, entry, profile: Profile) -> Reply:
         events = read_events(entry.read("stdout.jsonl"))

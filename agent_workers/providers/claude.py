@@ -223,6 +223,11 @@ def terminal_usage(terminal: Mapping) -> dict:
             "modelUsage": terminal.get("modelUsage") or {}}
 
 
+# Инструменты хода с каталогом: только чтение и поиск. Ни Bash, ни правок — в чужом каталоге
+# модель ничего не запускает и не меняет.
+READ_ONLY = "Read,Grep,Glob"
+
+
 @dataclass
 class ClaudeAdapter:
     executable: str | None = None
@@ -267,10 +272,16 @@ class ClaudeAdapter:
         # а разбор всё равно читает только целые сообщения и итог.
         # Ход — вопрос и ответ, продолжать его никто не будет: беседу не сохраняем,
         # иначе каталог учётной записи рос бы с каждым ходом.
+        # С каталогом ход идёт в нём, и модель может его читать — только читать. Настройки
+        # и хуки из .claude этого каталога не грузятся (--setting-sources user): чужой
+        # репозиторий не должен ничего запускать и разрешать сам себе.
+        place = common.workspace(request)
+        tools = (("--tools", READ_ONLY, "--allowedTools", READ_ONLY, "--setting-sources", "user")
+                 if place else ("--tools", ""))
         argv = (self.executable, "-p", "--output-format", "stream-json", "--verbose",
-                "--model", model, "--tools", "", "--strict-mcp-config", "--mcp-config", MCP_OFF,
+                "--model", model, *tools, "--strict-mcp-config", "--mcp-config", MCP_OFF,
                 "--system-prompt-file", str(system), "--no-session-persistence")
-        return Command(argv, self.environment(profile), entry.folder, stdin)
+        return Command(argv, self.environment(profile), place or entry.folder, stdin)
 
     def reply(self, entry, profile: Profile) -> Reply:
         streamed, terminal, session = read_stream(entry.read("stdout.jsonl"))

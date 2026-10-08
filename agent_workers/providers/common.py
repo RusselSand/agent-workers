@@ -41,6 +41,19 @@ def find_executable(explicit: str | None, variable: str, *names: str) -> str:
     return str(Path(found).resolve())
 
 
+def workspace(request: Mapping[str, object]) -> Path | None:
+    """Каталог, который модель читает в этом ходе: request["workspace"]. Нет — ход без файлов.
+    Есть, но это не каталог, — ошибка запроса: ход без нужных файлов ответил бы ни о чём, а
+    деньги взял бы."""
+    value = request.get("workspace")
+    if value is None or value == "":
+        return None
+    path = Path(str(value)).resolve()
+    if not path.is_dir():
+        raise ValueError(f"workspace — не каталог: {path}")
+    return path
+
+
 def environment(profile: Profile, home_variable: str, extra: set[str] = frozenset()) -> dict:
     private_dir(profile.home)   # там токены входа: соседу по машине туда незачем
     allowed = ALLOWED | extra

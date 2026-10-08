@@ -348,3 +348,23 @@ def test_unlimited_credits_without_a_balance_are_still_credits(sample, profile):
     assert credits_of(result["rateLimits"]) is None
     assert unlimited(result["rateLimits"]) is True
 
+
+
+def test_a_workspace_is_the_root_of_the_turn_and_read_only(tmp_path, profile):
+    """Даже если в настройках песочница пишущая: чужой каталог только читают."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    writing = CodexAdapter(executable=cli_stub(), sandbox="workspace-write")
+    command = writing.ask(Entry(tmp_path, "run"), {"user": "x", "workspace": str(repo)}, profile)
+    argv = command.argv
+    assert argv[argv.index("-s") + 1] == "read-only"
+    assert argv[argv.index("-C") + 1] == str(repo.resolve())
+    assert command.cwd == repo.resolve()
+
+
+def test_without_a_workspace_the_sandbox_is_as_configured(tmp_path, profile):
+    writing = CodexAdapter(executable=cli_stub(), sandbox="workspace-write")
+    entry = Entry(tmp_path, "run")
+    command = writing.ask(entry, {"user": "x"}, profile)
+    assert command.argv[command.argv.index("-s") + 1] == "workspace-write"
+    assert "-C" not in command.argv and command.cwd == entry.folder
