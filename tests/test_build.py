@@ -42,6 +42,13 @@ def test_model_and_policy_come_from_the_settings(tmp_path):
     assert worker.policy.refuse_above == 50.0
 
 
+def test_turn_limits_come_from_the_settings(tmp_path):
+    worker = build(settings_at(tmp_path, "AGENT_PROVIDER=codex\nAGENT_TIMEOUT=7200"
+                                         "\nAGENT_IDLE_TIMEOUT="))
+    assert worker.timeout == 7200.0
+    assert worker.idle is None
+
+
 def test_cli_path_comes_from_the_env_file_too(tmp_path, monkeypatch):
     """AGENT_CODEX_BINARY в .env работает, а относительный путь — от каталога .env."""
     from pathlib import Path

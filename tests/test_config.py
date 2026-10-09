@@ -142,6 +142,25 @@ def test_empty_value_means_off_not_default(tmp_path):
     assert settings_at(tmp_path, "AGENT_PROVIDER=claude").policy.refuse_above == 95.0
 
 
+def test_turn_limits_come_from_the_file_and_empty_removes_one(tmp_path):
+    settings = settings_at(tmp_path, "AGENT_PROVIDER=claude\nAGENT_TIMEOUT=7200\nAGENT_IDLE_TIMEOUT=")
+    assert settings.timeout == 7200.0
+    assert settings.idle is None
+    default = settings_at(tmp_path, "AGENT_PROVIDER=claude")
+    assert (default.timeout, default.idle) == (3600.0, 900.0)
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "nan", "inf", "час"])
+@pytest.mark.parametrize(("key", "limit"), [("AGENT_TIMEOUT", "timeout"),
+                                            ("AGENT_IDLE_TIMEOUT", "idle")])
+def test_turn_limit_that_is_not_positive_seconds_is_a_configuration_error(tmp_path, key, limit,
+                                                                          value):
+    """Ноль снимал бы каждый ход сразу после запуска, уже оплаченным; nan молча снял бы предел."""
+    settings = settings_at(tmp_path, f"AGENT_PROVIDER=claude\n{key}={value}")
+    with pytest.raises(ValueError, match=key):
+        getattr(settings, limit)
+
+
 def test_comment_after_a_quoted_value_is_cut_off():
     """AGENT_MODEL="opus" # закреплено — кавычки снимаются, комментарий не прилипает."""
     values = parse('AGENT_MODEL="claude-opus-5" # закреплено')

@@ -1,6 +1,6 @@
 [project]
 name = "agent-workers"
-version = "0.2.0"
+version = "0.3.0"
 description = "One turn of a subscription CLI (Claude Code, Codex): login, subscription spend before and after, API price estimate, an outbox of paid answers"
 requires-python = ">=3.14"
 dependencies = []

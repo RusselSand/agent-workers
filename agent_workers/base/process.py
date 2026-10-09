@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import signal
 import subprocess
@@ -10,6 +11,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .contract import Command
+
+# Пределы хода по умолчанию, в секундах. Общий — страховка: ход, который пишет в журналы,
+# может идти долго, например читая большой репозиторий. Зависшая CLI молчит, и её снимает
+# предел молчания. Он с запасом, потому что без пословного вывода модель может долго молчать,
+# пока думает или пишет большой ответ.
+TURN_TIMEOUT = 3600.0
+IDLE_TIMEOUT = 900.0
 
 
 def hidden() -> dict:
@@ -83,7 +91,21 @@ class LaunchError(OSError):
 @dataclass(frozen=True)
 class Outcome:
     returncode: int | None
-    interruption: str | None  # stopped | timeout | interrupted | None
+    interruption: str | None  # stopped | timeout | idle | interrupted | None
+
+
+def seconds(value: float | None, what: str) -> float | None:
+    """Предел в секундах или None, если предела нет. Ноль и меньше снимали бы каждый ход сразу
+    после запуска, то есть уже оплаченным, а nan молча выключал бы предел, — это ошибка."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not (math.isfinite(value) and value > 0):
+        raise ValueError(f"{what} — секунды больше нуля или None: {value!r}")
+    return float(value)
+
+
+def written(*journals) -> int:
+    return sum(os.fstat(journal.fileno()).st_size for journal in journals)
 
 
 def capture(command: Command) -> str:
@@ -112,12 +134,16 @@ def launch(command: Command, stdin, out, err) -> subprocess.Popen:
         raise LaunchError(f"CLI не запустилась: {exc}") from exc
 
 
-def supervise(command: Command, *, stdout: Path, stderr: Path, stop=None,
-              on_start=None, timeout: float = 1200, sync_every: float = 20) -> Outcome:
+def supervise(command: Command, *, stdout: Path, stderr: Path, stop=None, on_start=None,
+              timeout: float | None = TURN_TIMEOUT, idle: float | None = IDLE_TIMEOUT,
+              sync_every: float = 20) -> Outcome:
     """Длинный ход. Журналы только дозаписываются, чтобы обрыв не уносил уже полученное.
 
     on_start зовётся ровно тогда, когда процесс уже запущен: всё, что сломалось раньше, —
     журналы, stdin, сам запуск — случилось до хода, и платить там было не за что.
+
+    timeout — предел всего хода, idle — предел молчания: ни строки ни в один из журналов.
+    None снимает предел.
     """
     stop = stop or (lambda: False)
     on_start = on_start or (lambda: None)
@@ -130,28 +156,51 @@ def supervise(command: Command, *, stdout: Path, stderr: Path, stop=None,
             process = launch(command, stdin, out, err)
             try:
                 on_start()   # внутри try: сорвётся отметка — процесс всё равно снимем
-                started = last_sync = time.monotonic()
-                while process.poll() is None:
-                    now = time.monotonic()
-                    if stop():
-                        interruption = "stopped"
-                        break
-                    if now - started >= timeout:
-                        interruption = "timeout"
-                        break
-                    if now - last_sync >= sync_every:
-                        os.fsync(out.fileno())
-                        os.fsync(err.fileno())
-                        last_sync = now
-                    time.sleep(0.2)
+                interruption = watch(process, out, err, stop=stop, timeout=timeout, idle=idle,
+                                     sync_every=sync_every)
             finally:
                 if process.poll() is None:
                     interruption = interruption or "interrupted"
                 # И после обычного выхода: в группе могли остаться фоновые потомки.
                 terminate_tree(process)
-                os.fsync(out.fileno())
-                os.fsync(err.fileno())
+                sync(out, err)
     finally:
         if command.stdin:
             stdin.close()
     return Outcome(process.returncode, interruption)
+
+
+def watch(process: subprocess.Popen, out, err, *, stop, timeout: float | None,
+          idle: float | None, sync_every: float) -> str | None:
+    """Ждать, пока процесс выйдет сам. Вернёт, почему его пора снять, или None, если вышел."""
+    started = last_sync = last_output = time.monotonic()
+    size = written(out, err)
+    while process.poll() is None:
+        now = time.monotonic()
+        if (grown := written(out, err)) != size:
+            size, last_output = grown, now
+        reason = overdue(stop, now - started, timeout, now - last_output, idle)
+        if reason:
+            return reason
+        if now - last_sync >= sync_every:
+            sync(out, err)
+            last_sync = now
+        time.sleep(0.2)
+    return None
+
+
+def overdue(stop, running: float, timeout: float | None, silent: float,
+            idle: float | None) -> str | None:
+    """Пора ли снимать ход: попросили остановиться, вышел предел хода или молчания."""
+    if stop():
+        return "stopped"
+    if timeout is not None and running >= timeout:
+        return "timeout"
+    if idle is not None and silent >= idle:
+        return "idle"
+    return None
+
+
+def sync(*journals) -> None:
+    for journal in journals:
+        os.fsync(journal.fileno())

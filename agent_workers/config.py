@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .base.guard import LimitPolicy
+from .base.process import IDLE_TIMEOUT, TURN_TIMEOUT, seconds
 
 FILENAME = ".env"
 DEPTH = 4
@@ -152,3 +153,22 @@ class Settings:
         except ValueError:
             raise ValueError(f"AGENT_REFUSE_ABOVE — процент от 0 до 100, а пустое значение "
                              f"снимает порог; сейчас: {refuse!r}") from None
+
+    def limit(self, key: str, default: float) -> float | None:
+        """Предел хода в секундах. Пустое значение снимает предел, как у AGENT_REFUSE_ABOVE."""
+        value = self.get(key, str(default)).strip()
+        if not value:
+            return None
+        try:
+            return seconds(float(value), key)
+        except ValueError:
+            raise ValueError(f"{key} — секунды больше нуля, а пустое значение снимает предел; "
+                             f"сейчас: {value!r}") from None
+
+    @property
+    def timeout(self) -> float | None:
+        return self.limit("AGENT_TIMEOUT", TURN_TIMEOUT)
+
+    @property
+    def idle(self) -> float | None:
+        return self.limit("AGENT_IDLE_TIMEOUT", IDLE_TIMEOUT)
