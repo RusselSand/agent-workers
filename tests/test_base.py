@@ -930,8 +930,9 @@ def test_no_limits_let_the_cli_finish(tmp_path):
 @pytest.mark.parametrize("name", ["timeout", "idle"])
 def test_turn_limit_is_checked_when_the_worker_is_built(tmp_path, profile, name, value):
     """Негодный предел выяснился бы только в ходе, уже оплаченном: ноль снял бы его сразу."""
+    adapter, runs, limit = FakeAdapter(tmp_path), tmp_path / "runs", {name: value}
     with pytest.raises(ValueError, match="Предел"):
-        Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET, **{name: value})
+        Worker(adapter, profile, runs, QUIET, **limit)
 
 
 @pytest.mark.parametrize(("interruption", "reason"), [

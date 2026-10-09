@@ -151,12 +151,14 @@ def test_turn_limits_come_from_the_file_and_empty_removes_one(tmp_path):
 
 
 @pytest.mark.parametrize("value", ["0", "-5", "nan", "inf", "час"])
-@pytest.mark.parametrize("key", ["AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"])
-def test_turn_limit_that_is_not_positive_seconds_is_a_configuration_error(tmp_path, key, value):
+@pytest.mark.parametrize(("key", "limit"), [("AGENT_TIMEOUT", "timeout"),
+                                            ("AGENT_IDLE_TIMEOUT", "idle")])
+def test_turn_limit_that_is_not_positive_seconds_is_a_configuration_error(tmp_path, key, limit,
+                                                                          value):
     """Ноль снимал бы каждый ход сразу после запуска, уже оплаченным; nan молча снял бы предел."""
     settings = settings_at(tmp_path, f"AGENT_PROVIDER=claude\n{key}={value}")
     with pytest.raises(ValueError, match=key):
-        _ = settings.timeout, settings.idle
+        getattr(settings, limit)
 
 
 def test_comment_after_a_quoted_value_is_cut_off():
