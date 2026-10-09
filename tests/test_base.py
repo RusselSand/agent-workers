@@ -17,6 +17,7 @@ from agent_workers.base import (
     Worker,
 )
 from agent_workers.base.entry import LOCK, Entry, NotRemoved, folder_for
+from agent_workers.base.process import Outcome
 from agent_workers.testing import QUIET, FakeAdapter, limits
 
 
@@ -887,3 +888,72 @@ def test_the_adapter_gets_the_workspace_resolved(tmp_path, profile):
     worker_at(tmp_path, profile, adapter).run(
         {"user": "вопрос", "workspace": f"{repo}/../repo"}, key="задача")
     assert adapter.asked[0]["workspace"] == str(repo.resolve())
+
+
+def supervised_code(tmp_path, code: str, **options):
+    """Надзор за подпроцессом Python с кодом code; вернуть исход и сколько он шёл."""
+    import time
+
+    from agent_workers.base.process import supervise
+
+    command = Command((sys.executable, "-c", code), dict(os.environ), tmp_path)
+    started = time.monotonic()
+    outcome = supervise(command, stdout=tmp_path / "out", stderr=tmp_path / "err", **options)
+    return outcome, time.monotonic() - started
+
+
+def test_silent_cli_is_taken_down_by_the_idle_limit(tmp_path):
+    """Зависшая CLI молчит: её снимает предел молчания, а не общий предел хода."""
+    code = "import time; print('{}', flush=True); time.sleep(60)"
+    outcome, took = supervised_code(tmp_path, code, timeout=60, idle=0.5)
+    assert outcome.interruption == "idle"
+    assert took < 30
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_cli_that_keeps_writing_outlives_the_idle_limit(tmp_path, stream):
+    """Молчание — это ни строки ни в один журнал, а не долгий ход."""
+    code = (f"import sys, time\nfor _ in range(15):\n"
+            f"    print('{{}}', file=sys.{stream}, flush=True)\n    time.sleep(0.1)")
+    outcome, took = supervised_code(tmp_path, code, timeout=60, idle=0.5)
+    assert outcome.interruption is None
+    assert outcome.returncode == 0
+    assert took > 0.5                                     # дольше предела молчания
+
+
+def test_no_limits_let_the_cli_finish(tmp_path):
+    outcome, _ = supervised_code(tmp_path, "print('{}')", timeout=None, idle=None)
+    assert outcome == Outcome(0, None)
+
+
+@pytest.mark.parametrize("value", [0, -1.0, float("nan"), float("inf"), True])
+@pytest.mark.parametrize("name", ["timeout", "idle"])
+def test_turn_limit_is_checked_when_the_worker_is_built(tmp_path, profile, name, value):
+    """Негодный предел выяснился бы только в ходе, уже оплаченном: ноль снял бы его сразу."""
+    with pytest.raises(ValueError, match="Предел"):
+        Worker(FakeAdapter(tmp_path), profile, tmp_path / "runs", QUIET, **{name: value})
+
+
+@pytest.mark.parametrize(("interruption", "reason"), [
+    ("idle", "CLI молчала 15 мин, ход снят как зависший"),
+    ("timeout", "не уложился в предел хода: 60 мин"),
+    ("stopped", "остановлен по запросу"),
+])
+def test_reason_says_why_the_turn_was_taken_down(tmp_path, profile, monkeypatch,
+                                                 interruption, reason):
+    """Диагностика CLI скажет только, что ответ не дописан; почему — знает надзор."""
+    import agent_workers.base.worker as worker_module
+
+    given = {}
+
+    def cut(*args, on_start, **kwargs):
+        given.update(kwargs)
+        on_start()
+        return Outcome(None, interruption)
+
+    monkeypatch.setattr(worker_module, "supervise", cut)
+    result = worker_at(tmp_path, profile).run({"user": "ок"}, key="задача")
+    assert (given["timeout"], given["idle"]) == (3600.0, 900.0)
+    assert result["state"] == "incomplete"
+    assert result["reason"] == reason
+    assert result["entry"].meta["interruption"] == interruption

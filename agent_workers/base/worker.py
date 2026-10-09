@@ -22,7 +22,7 @@ from .contract import Adapter, Profile, Reply
 from .entry import Entry, private_dir
 from .guard import Guard, LimitPolicy
 from .outbox import Outbox
-from .process import capture, interactive, supervise
+from .process import IDLE_TIMEOUT, TURN_TIMEOUT, capture, interactive, seconds, supervise
 
 log = logging.getLogger(__name__)
 
@@ -51,15 +51,24 @@ def with_workspace(request: Mapping[str, object]) -> Mapping[str, object]:
     place = workspace(request)
     return {**request, "workspace": str(place)} if place else request
 
+
+def span(limit: float) -> str:
+    return f"{limit / 60:g} мин" if limit >= 60 else f"{limit:g} с"
+
+
 @dataclass
 class Worker:
     adapter: Adapter
     profile: Profile
     root: Path
     policy: LimitPolicy = field(default_factory=LimitPolicy)
-    timeout: float = 1200
+    timeout: float | None = TURN_TIMEOUT   # весь ход, с; None — без предела
+    idle: float | None = IDLE_TIMEOUT      # CLI молчит, ни строки в журналах, с; None — не следить
 
     def __post_init__(self) -> None:
+        # Проверяем при сборке: негодный предел выяснился бы только в оплаченном ходе.
+        self.timeout = seconds(self.timeout, "Предел хода")
+        self.idle = seconds(self.idle, "Предел молчания CLI")
         self.guard = Guard(self.adapter, self.profile, self.policy)
         self.outbox = Outbox(self.root)
 
@@ -125,7 +134,7 @@ class Worker:
         try:
             outcome = supervise(command, stdout=entry.stdout, stderr=entry.stderr,
                                 stop=stop, on_start=running,
-                                timeout=self.timeout)
+                                timeout=self.timeout, idle=self.idle)
         except BaseException as exc:
             if not launched:
                 # Процесс так и не стартовал — не открылись журналы, не запустилась CLI:
@@ -141,12 +150,26 @@ class Worker:
         reply = self.parse(entry)
         state = "answered" if reply.complete else "incomplete"
         entry.update(state=state, diagnostic=reply.diagnostic)
+        reason = None if reply.complete else self.interrupted(outcome.interruption)
         if outcome.interruption == "stopped" or (stop is not None and stop()):
             # Нас попросили остановиться — в том числе сразу после того, как CLI вышла
             # сама: ответ уже в папке, а замер «после» стоит минуты пауз и запусков CLI.
-            return self.result(state, entry, reply, before, None)
+            return self.result(state, entry, reply, before, None, reason=reason)
         after = self.guard.measure("after", session=reply.session_id, model=model)
-        return self.result(state, entry, reply, before, after)
+        return self.result(state, entry, reply, before, after, reason=reason)
+
+    def interrupted(self, interruption: str | None) -> str | None:
+        """Почему ход сняли, если сняли мы, — словами. Диагностика CLI скажет лишь, что
+        ответ не дописан, а не почему."""
+        match interruption:
+            case "stopped":
+                return "остановлен по запросу"
+            case "timeout":
+                return f"не уложился в предел хода: {span(self.timeout)}"
+            case "idle":
+                return f"CLI молчала {span(self.idle)}, ход снят как зависший"
+            case _:
+                return None
 
     def preflight(self, entry: Entry, model: str, *, stop=None,
                   ensure_login: bool = False) -> tuple[dict | None, object]:

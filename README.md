@@ -17,7 +17,7 @@
 dependencies = ["agent-workers"]
 
 [tool.uv.sources]
-agent-workers = { git = "https://github.com/RusselSand/agent-workers", tag = "v0.2.0" }
+agent-workers = { git = "https://github.com/RusselSand/agent-workers", tag = "v0.3.0" }
 ```
 
 Импорты прежние: `from agent_workers import build`. Команды

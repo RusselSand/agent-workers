@@ -24,4 +24,4 @@ def build(settings: Settings | None = None) -> Worker:
     adapter = ADAPTERS[provider](**options)
     # Имя профиля — имя каталога: так в отчётах видно ровно то, что названо в настройках.
     return Worker(adapter, Profile(settings.home.name, settings.home),
-                  settings.runs, settings.policy)
+                  settings.runs, settings.policy, timeout=settings.timeout, idle=settings.idle)
