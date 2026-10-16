@@ -230,12 +230,29 @@ def test_effort_level_goes_into_the_turn_command_as_a_flag(profile, tmp_path, ef
     assert argv[argv.index("--effort") + 1] == effort
 
 
+@pytest.mark.parametrize("folder", [None, "repo"])
+def test_effort_level_outranks_the_level_in_the_account_settings(profile, tmp_path, folder):
+    """CLAUDE_CODE_EFFORT_LEVEL из settings.json учётной записи главнее флага: тот же уровень
+    уходит и в --settings, которые старше пользовательских, в том числе в ходе с каталогом,
+    где из настроек на диске грузятся только user (q-001)."""
+    request = {"user": "x"}
+    if folder:
+        (tmp_path / folder).mkdir()
+        request["workspace"] = str(tmp_path / folder)
+    claude = ClaudeAdapter(executable=cli_stub(), effort="xhigh")
+    argv = claude.ask(Entry(tmp_path, "run"), request, profile).argv
+    settings = json.loads(argv[argv.index("--settings") + 1])
+    assert settings == {"env": {"CLAUDE_CODE_EFFORT_LEVEL": "xhigh"}}
+
+
 @pytest.mark.parametrize("effort", [None, ""])
 def test_without_an_effort_level_the_turn_has_no_flag(profile, tmp_path, effort):
     """Уровень не задан — его выбирает сама CLI, как и раньше."""
     claude = ClaudeAdapter(executable=cli_stub(), effort=effort)
     assert claude.effort is None
-    assert "--effort" not in claude.ask(Entry(tmp_path, "run"), {"user": "x"}, profile).argv
+    argv = claude.ask(Entry(tmp_path, "run"), {"user": "x"}, profile).argv
+    assert "--effort" not in argv
+    assert "--settings" not in argv
 
 
 def test_service_calls_get_no_effort_level(profile, monkeypatch):
@@ -254,6 +271,7 @@ def test_service_calls_get_no_effort_level(profile, monkeypatch):
     for command in (claude.check(profile), claude.login(profile), claude.logout(profile),
                     claude.usage_command(profile), *opened):
         assert "--effort" not in command.argv
+        assert "--settings" not in command.argv
 
 
 @pytest.mark.parametrize("effort", ["extreme", "High", "minimal"])

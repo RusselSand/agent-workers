@@ -241,6 +241,14 @@ def absolute_rule(path: PurePath) -> str:
     return "/" + posix if posix.startswith("/") else "//" + posix
 
 
+def effort_settings(effort: str) -> str:
+    """Уровень effort для --settings. Переменная CLAUDE_CODE_EFFORT_LEVEL главнее флага --effort,
+    и если учётная запись задала её в env своего settings.json, флаг молча проигрывает. Настройки
+    из --settings старше пользовательских и грузятся при любом --setting-sources, так что та же
+    переменная оттуда перекрывает учётку: AGENT_EFFORT главнее (решение владельца, q-001)."""
+    return json.dumps({"env": {"CLAUDE_CODE_EFFORT_LEVEL": effort}}, separators=(",", ":"))
+
+
 @dataclass
 class ClaudeAdapter:
     executable: str | None = None
@@ -302,7 +310,9 @@ class ClaudeAdapter:
                   "--disallowedTools", f"Read({absolute_rule(profile.home)}/**)")
                  if place else ("--tools", ""))
         # Уровень effort — только у хода модели: вход, статус и замеры модель не зовут.
-        effort = ("--effort", self.effort) if self.effort else ()
+        # Флагу вторит --settings: иначе уровень из настроек учётной записи был бы главнее.
+        effort = (("--effort", self.effort, "--settings", effort_settings(self.effort))
+                  if self.effort else ())
         argv = (self.executable, "-p", "--output-format", "stream-json", "--verbose",
                 "--model", model, *effort, *tools, "--strict-mcp-config", "--mcp-config", MCP_OFF,
                 "--system-prompt-file", str(system), "--no-session-persistence")
