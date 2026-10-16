@@ -277,8 +277,9 @@ def test_service_calls_get_no_effort_level(profile, monkeypatch):
 @pytest.mark.parametrize("effort", ["extreme", "High", "minimal"])
 def test_unknown_effort_level_is_refused_when_the_adapter_is_built(effort):
     """Иначе CLI отвергала бы флаг в каждом ходе."""
+    executable = cli_stub()
     with pytest.raises(ValueError, match="low, medium, high, xhigh, max"):
-        ClaudeAdapter(executable=cli_stub(), effort=effort)
+        ClaudeAdapter(executable=executable, effort=effort)
 
 
 @pytest.mark.parametrize(("path", "rule"), [
