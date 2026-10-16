@@ -5,7 +5,9 @@ from pathlib import PurePosixPath, PureWindowsPath
 import pytest
 
 from agent_workers.base import Entry
+from agent_workers.providers import claude as claude_module
 from agent_workers.providers.claude import (
+    EFFORTS,
     ClaudeAdapter,
     absolute_rule,
     concerns,
@@ -219,6 +221,65 @@ def test_a_workspace_turn_is_told_not_to_read_its_own_account(profile, tmp_path)
     denied = argv[argv.index("--disallowedTools") + 1]
     assert denied == f"Read({absolute_rule(profile.home)}/**)"
     assert denied.startswith("Read(//")
+
+
+@pytest.mark.parametrize("effort", EFFORTS)
+def test_effort_level_goes_into_the_turn_command_as_a_flag(profile, tmp_path, effort):
+    claude = ClaudeAdapter(executable=cli_stub(), effort=effort)
+    argv = claude.ask(Entry(tmp_path, "run"), {"user": "x"}, profile).argv
+    assert argv[argv.index("--effort") + 1] == effort
+
+
+@pytest.mark.parametrize("folder", [None, "repo"])
+def test_effort_level_outranks_the_level_in_the_account_settings(profile, tmp_path, folder):
+    """CLAUDE_CODE_EFFORT_LEVEL из settings.json учётной записи главнее флага: тот же уровень
+    уходит и в --settings, которые старше пользовательских, в том числе в ходе с каталогом,
+    где из настроек на диске грузятся только user (q-001)."""
+    request = {"user": "x"}
+    if folder:
+        (tmp_path / folder).mkdir()
+        request["workspace"] = str(tmp_path / folder)
+    claude = ClaudeAdapter(executable=cli_stub(), effort="xhigh")
+    argv = claude.ask(Entry(tmp_path, "run"), request, profile).argv
+    settings = json.loads(argv[argv.index("--settings") + 1])
+    assert settings == {"env": {"CLAUDE_CODE_EFFORT_LEVEL": "xhigh"}}
+
+
+@pytest.mark.parametrize("effort", [None, ""])
+def test_without_an_effort_level_the_turn_has_no_flag(profile, tmp_path, effort):
+    """Уровень не задан — его выбирает сама CLI, как и раньше."""
+    claude = ClaudeAdapter(executable=cli_stub(), effort=effort)
+    assert claude.effort is None
+    argv = claude.ask(Entry(tmp_path, "run"), {"user": "x"}, profile).argv
+    assert "--effort" not in argv
+    assert "--settings" not in argv
+
+
+def test_service_calls_get_no_effort_level(profile, monkeypatch):
+    """Вход, статус, замер окон и initialize модель не зовут: уровень effort нужен только ходу."""
+    opened = []
+
+    def channel(command):
+        opened.append(command)
+        raise RuntimeError("управляющий канал в тесте не открывается")
+
+    monkeypatch.setattr(claude_module, "Channel", channel)
+    claude = ClaudeAdapter(executable=cli_stub(), effort="max")
+    with pytest.raises(RuntimeError):
+        claude.usage(profile)
+    assert len(opened) == 1
+    for command in (claude.check(profile), claude.login(profile), claude.logout(profile),
+                    claude.usage_command(profile), *opened):
+        assert "--effort" not in command.argv
+        assert "--settings" not in command.argv
+
+
+@pytest.mark.parametrize("effort", ["extreme", "High", "minimal"])
+def test_unknown_effort_level_is_refused_when_the_adapter_is_built(effort):
+    """Иначе CLI отвергала бы флаг в каждом ходе."""
+    executable = cli_stub()
+    with pytest.raises(ValueError, match="low, medium, high, xhigh, max"):
+        ClaudeAdapter(executable=executable, effort=effort)
 
 
 @pytest.mark.parametrize(("path", "rule"), [

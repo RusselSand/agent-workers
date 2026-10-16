@@ -267,7 +267,7 @@ def rollout_windows(raw: Mapping) -> tuple[Window, ...]:
 class CodexAdapter:
     executable: str | None = None
     model: str = "gpt-5.6-sol"
-    effort: str = "medium"
+    effort: str = "medium"   # уходит как есть: какие уровни принимает модель, решает Codex
     sandbox: str = "read-only"
     name: ClassVar[str] = "codex"
 

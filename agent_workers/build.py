@@ -18,10 +18,17 @@ def build(settings: Settings | None = None) -> Worker:
     options = {}
     if settings.model:
         options["model"] = settings.model
+    if settings.effort:
+        options["effort"] = settings.effort
     if executable := settings.binary(provider):
         # Путь к CLI — из тех же настроек, что и всё остальное: .env, окружение, флаги.
         options["executable"] = executable
-    adapter = ADAPTERS[provider](**options)
+    try:
+        adapter = ADAPTERS[provider](**options)
+    except ValueError as exc:
+        # Из настроек адаптер проверяет уровень effort: какие годятся, знает провайдер.
+        # Опечатка — ошибка настройки при сборке, а не отказ CLI в каждом ходе.
+        raise ValueError(f"AGENT_EFFORT: {exc}") from None
     # Имя профиля — имя каталога: так в отчётах видно ровно то, что названо в настройках.
     return Worker(adapter, Profile(settings.home.name, settings.home),
                   settings.runs, settings.policy, timeout=settings.timeout, idle=settings.idle)
