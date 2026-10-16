@@ -120,6 +120,12 @@ class Settings:
     def model(self) -> str:
         return self.get("AGENT_MODEL")
 
+    @property
+    def effort(self) -> str:
+        """Уровень effort. Пустое значение — то же, что не задано: уровень по умолчанию.
+        Какие уровни годятся, знает провайдер: адаптер проверяет их при сборке."""
+        return self.get("AGENT_EFFORT").strip()
+
     def binary(self, provider: str) -> str | None:
         """Путь к CLI провайдера, если назван: AGENT_CLAUDE_BINARY, AGENT_CODEX_BINARY.
         Относительный — по тем же правилам, что и прочие пути из настроек."""

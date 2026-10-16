@@ -219,6 +219,7 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--provider", choices=sorted(ADAPTERS), help="какая CLI")
         command.add_argument("--home", help="каталог учётной записи")
         command.add_argument("--model", help="модель, иначе из .env или умолчание адаптера")
+        command.add_argument("--effort", help="уровень effort, иначе из .env или умолчание")
         if name == "collect":
             command.add_argument("key", nargs="?", help="ключ хода из pending")
             command.add_argument("--all", action="store_true", help="забрать всё разом")
@@ -237,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         settings = Settings.load().override(provider=options.provider, home=options.home,
-                                            model=options.model)
+                                            model=options.model, effort=options.effort)
         if options.command in ("pending", "collect"):
             # Разобрать лоток можно и без CLI: она может быть снесена или сломана обновлением.
             outbox = Outbox(settings.runs)

@@ -33,6 +33,9 @@ CONTROL = ("-p", "--input-format", "stream-json", "--output-format", "stream-jso
 
 MCP_OFF = "{\"mcpServers\":{}}"
 
+# Уровни, которые понимает --effort. Без флага уровень выбирает сама CLI.
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
 # Длительность окна в ответе не приходит, а для оценки скорости расхода она нужна.
 GROUPS = {"session": timedelta(hours=5), "weekly": timedelta(days=7)}
 LEGACY = {"five_hour": timedelta(hours=5), "seven_day": timedelta(days=7),
@@ -242,9 +245,15 @@ def absolute_rule(path: PurePath) -> str:
 class ClaudeAdapter:
     executable: str | None = None
     model: str = "claude-opus-5"
+    effort: str | None = None
     name: ClassVar[str] = "claude"
 
     def __post_init__(self) -> None:
+        # Неизвестный уровень CLI отвергла бы в каждом ходе: говорим при сборке, один раз.
+        self.effort = self.effort or None
+        if self.effort is not None and self.effort not in EFFORTS:
+            raise ValueError(f"Уровень effort у Claude — {', '.join(EFFORTS)}; "
+                             f"сейчас: {self.effort!r}")
         self.executable = common.find_executable(self.executable, "AGENT_CLAUDE_BINARY",
                                                  "claude.exe", "claude")
 
@@ -292,8 +301,10 @@ class ClaudeAdapter:
         tools = (("--tools", READ_ONLY, "--allowedTools", READ_ONLY, "--setting-sources", "user",
                   "--disallowedTools", f"Read({absolute_rule(profile.home)}/**)")
                  if place else ("--tools", ""))
+        # Уровень effort — только у хода модели: вход, статус и замеры модель не зовут.
+        effort = ("--effort", self.effort) if self.effort else ()
         argv = (self.executable, "-p", "--output-format", "stream-json", "--verbose",
-                "--model", model, *tools, "--strict-mcp-config", "--mcp-config", MCP_OFF,
+                "--model", model, *effort, *tools, "--strict-mcp-config", "--mcp-config", MCP_OFF,
                 "--system-prompt-file", str(system), "--no-session-persistence")
         return Command(argv, self.environment(profile), place or entry.folder, stdin)
 

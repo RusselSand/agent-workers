@@ -362,6 +362,19 @@ def test_a_workspace_is_the_root_of_the_turn_and_read_only(tmp_path, profile):
     assert command.cwd == repo.resolve()
 
 
+@pytest.mark.parametrize("effort", ["high", "minimal"])
+def test_effort_level_goes_to_model_reasoning_effort_as_is(tmp_path, profile, effort):
+    """Своей проверки нет: какие уровни принимает модель, решает Codex."""
+    codex = CodexAdapter(executable=cli_stub(), effort=effort)
+    argv = codex.ask(Entry(tmp_path, "run"), {"user": "x"}, profile).argv
+    assert argv[argv.index("-c") + 1] == f'model_reasoning_effort="{effort}"'
+
+
+def test_without_an_effort_level_codex_reasons_at_medium(tmp_path, profile):
+    argv = adapter().ask(Entry(tmp_path, "run"), {"user": "x"}, profile).argv
+    assert argv[argv.index("-c") + 1] == 'model_reasoning_effort="medium"'
+
+
 def test_without_a_workspace_the_sandbox_is_as_configured(tmp_path, profile):
     writing = CodexAdapter(executable=cli_stub(), sandbox="workspace-write")
     entry = Entry(tmp_path, "run")

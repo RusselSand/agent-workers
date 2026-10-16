@@ -15,6 +15,7 @@ def connection(tmp_path, monkeypatch):
         monkeypatch.setenv(name, cli_stub())
     monkeypatch.setenv("AGENT_PROVIDER", "claude")
     monkeypatch.setenv("AGENT_HOME", str(tmp_path / "учётка"))
+    monkeypatch.delenv("AGENT_EFFORT", raising=False)
     monkeypatch.chdir(tmp_path)
 
 
@@ -37,6 +38,22 @@ def test_flags_outrank_the_environment(capsys):
     out, err = capsys.readouterr()
     assert "-m gpt-5.6-luna" in out
     assert "подключение: codex" in err
+
+
+def test_commands_read_the_effort_level_like_the_model(capsys, monkeypatch):
+    monkeypatch.setenv("AGENT_EFFORT", "max")
+    cli.main(["run", "--dry-run", "привет"])
+    assert "--effort max" in capsys.readouterr().out
+    cli.main(["run", "--effort", "low", "--dry-run", "привет"])
+    assert "--effort low" in capsys.readouterr().out
+
+
+def test_unknown_effort_level_is_a_message_not_a_traceback(capsys, monkeypatch):
+    monkeypatch.setenv("AGENT_EFFORT", "hgh")
+    assert cli.main(["run", "--dry-run", "привет"]) == 2
+    err = capsys.readouterr().err
+    assert "AGENT_EFFORT" in err
+    assert "Traceback" not in err
 
 
 def test_another_account_is_another_folder(capsys, tmp_path):

@@ -12,6 +12,7 @@ def installed(monkeypatch):
     # Тесты не должны требовать установленных CLI: подсовываем существующий файл.
     for name in ("AGENT_CLAUDE_BINARY", "AGENT_CODEX_BINARY"):
         monkeypatch.setenv(name, cli_stub())
+    monkeypatch.delenv("AGENT_EFFORT", raising=False)
 
 
 def settings_at(tmp_path, text=""):
@@ -47,6 +48,32 @@ def test_turn_limits_come_from_the_settings(tmp_path):
                                          "\nAGENT_IDLE_TIMEOUT="))
     assert worker.timeout == 7200.0
     assert worker.idle is None
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+def test_effort_level_comes_from_the_settings(tmp_path, provider):
+    worker = build(settings_at(tmp_path, f"AGENT_PROVIDER={provider}\nAGENT_EFFORT=high"))
+    assert worker.adapter.effort == "high"
+
+
+@pytest.mark.parametrize("line", ["", "AGENT_EFFORT=", "AGENT_EFFORT=  "])
+def test_unset_or_empty_effort_leaves_claude_to_its_cli_and_codex_at_medium(tmp_path, line):
+    claude = build(settings_at(tmp_path, f"AGENT_PROVIDER=claude\n{line}"))
+    codex = build(settings_at(tmp_path, f"AGENT_PROVIDER=codex\n{line}"))
+    assert claude.adapter.effort is None
+    assert codex.adapter.effort == "medium"
+
+
+def test_unknown_effort_level_of_claude_is_a_configuration_error(tmp_path):
+    """Сказать при чтении настроек, а не проваливать каждый ход."""
+    settings = settings_at(tmp_path, "AGENT_PROVIDER=claude\nAGENT_EFFORT=hgh")
+    with pytest.raises(ValueError, match="AGENT_EFFORT"):
+        build(settings)
+
+
+def test_codex_takes_any_effort_level(tmp_path):
+    worker = build(settings_at(tmp_path, "AGENT_PROVIDER=codex\nAGENT_EFFORT=minimal"))
+    assert worker.adapter.effort == "minimal"
 
 
 def test_cli_path_comes_from_the_env_file_too(tmp_path, monkeypatch):

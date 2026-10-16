@@ -161,6 +161,23 @@ def test_turn_limit_that_is_not_positive_seconds_is_a_configuration_error(tmp_pa
         getattr(settings, limit)
 
 
+def test_effort_level_is_read_like_the_other_settings(tmp_path, monkeypatch):
+    monkeypatch.delenv("AGENT_EFFORT", raising=False)
+    settings = settings_at(tmp_path, "AGENT_PROVIDER=claude\nAGENT_EFFORT=high")
+    assert settings.effort == "high"
+    monkeypatch.setenv("AGENT_EFFORT", "xhigh")
+    assert settings.effort == "xhigh"
+    assert settings.override(effort="max").effort == "max"
+
+
+def test_empty_effort_level_is_the_same_as_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv("AGENT_EFFORT", raising=False)
+    assert settings_at(tmp_path, "AGENT_PROVIDER=claude").effort == ""
+    assert settings_at(tmp_path, "AGENT_PROVIDER=claude\nAGENT_EFFORT=").effort == ""
+    monkeypatch.setenv("AGENT_EFFORT", "  ")
+    assert settings_at(tmp_path, "AGENT_PROVIDER=claude\nAGENT_EFFORT=high").effort == ""
+
+
 def test_comment_after_a_quoted_value_is_cut_off():
     """AGENT_MODEL="opus" # закреплено — кавычки снимаются, комментарий не прилипает."""
     values = parse('AGENT_MODEL="claude-opus-5" # закреплено')
