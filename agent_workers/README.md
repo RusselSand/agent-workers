@@ -37,6 +37,37 @@ API, задача перестаёт быть папкой с журналами
 Шов описан в `base/contract.py`: `Command`, `Reply`, `Limits`, `Usage`, `Cost` и
 протокол `Adapter`.
 
+## Что CLI добавляет к запросу
+
+Ход должен быть как запрос в API: наш `system` и наш `user`. Каждая CLI по умолчанию
+добавляет свой системный промпт, описания инструментов и файлы контекста — тысячи токенов
+на ход. Провайдеры это выключают; что остаётся, выключить нельзя. Всё проверено записью
+запроса на локальном сервере (Claude Code 2.1.303–2.1.304, codex-cli 0.163.0, agy 1.4.2).
+
+| | чем выключено | что остаётся |
+|---|---|---|
+| Claude | `--system-prompt-file`, `--tools ""`, пустой MCP; без `workspace` — `--setting-sources ""` и `--disable-slash-commands`, с ним — `disableAllHooks`; переменные `CLAUDE_CODE_DISABLE_CLAUDE_MDS`, `…_AUTO_MEMORY`, `…_NONESSENTIAL_TRAFFIC`, `…_TERMINAL_TITLE` | ≈350 токенов: строка «You are a Claude agent…», окружение, модель, дата, почта учётной записи. Убирает их только `--bare`, а он не работает с подпиской |
+| Codex | `system` — через `model_instructions_file` вместо встроенных инструкций (без `system` — `instructions=""`); ключи `-c` из `QUIET`; каталог моделей из `providers/catalogs` | без `workspace` — ничего; с ним — инструменты `exec_command` и `write_stdin`, ≈670 токенов |
+| agy | свой агент: файл `~/.gemini/config/agents/aw-<хеш>.md` с `excludeDefaultComponents: true`, `inheritCustomizations: false` и списком `tools` | по подписке ≈2,2 тысячи токенов: agy 1.4 не выполняет `excludeDefaultComponents` и добавляет к нашему system свои разделы (user_information, messaging, artifacts, guidelines, communication_style), плюс инструмент `manage_task` и обёртка сообщения со временем. С API-ключом разделов нет, ≈600. Отдельный вызов маленькой модели за заголовком беседы в `usage` не попадает |
+
+**Каталог моделей Codex** — `codex-rs/models-manager/models.json` той версии CLI, где у
+каждой модели выключены `tool_mode`, `apply_patch_tool_type`, `multi_agent_version` и
+`supports_search_tool`, а в `bare` ещё и `shell_type`. Часть инструментов Codex берёт только
+оттуда, ключом `-c` их не снять. Каталог замещает список моделей целиком: новая модель или
+новая версия CLI — новый каталог. Модель, которой в каталоге нет, Codex ведёт на запасных
+метаданных и предупреждает, что это может ухудшить работу. Не проверено одно: примет ли подписочный бэкенд ChatGPT замену встроенных
+инструкций. Если нет — ход вернёт `cli_error`, и `system` придётся передавать через
+`developer_instructions`, рядом со встроенными (≈3 тысячи токенов).
+
+**agy** заменил Gemini CLI для подписки Google AI Pro/Ultra: Gemini CLI её больше не
+обслуживает. Файл агента пишется в профиль по хешу `system` и списка инструментов и
+остаётся: одинаковые ходы делят один файл. Беседу agy сохраняет всегда, поэтому после
+ответа её файлы удаляются по `conversation_id`. Своего каталога настроек у agy нет:
+профиль — это подмена `HOME` (на Windows ещё `USERPROFILE`). Токены входа agy держит в
+хранилище паролей ОС, если оно есть, — на Windows и на Linux с D-Bus оно одно на
+пользователя, и два профиля agy там делят один вход. Расход подписки и цену по API agy
+пока не отдаёт: ответ `/usage` по подписке ещё не видели, таблицы цен Gemini нет.
+
 ## Настройка
 
 Всё подключение — в `.env`, который ищется от текущего каталога вверх (образец —
@@ -44,7 +75,7 @@ API, задача перестаёт быть папкой с журналами
 умолчание.
 
 ```
-AGENT_PROVIDER=claude                          # claude | codex
+AGENT_PROVIDER=claude                          # claude | codex | agy
 AGENT_HOME=D:/PROJECTS/.agent/claude-рабочий   # каталог учётной записи
 AGENT_MODEL=claude-opus-5                      # необязательно
 AGENT_EFFORT=high                              # необязательно, см. ниже
@@ -54,6 +85,7 @@ AGENT_SPEND_CREDITS=1                          # 0 — стоять даже п�
 AGENT_TIMEOUT=3600                             # предел всего хода, с
 AGENT_IDLE_TIMEOUT=900                         # предел молчания CLI, с
 AGENT_CODEX_BINARY=...                         # путь к CLI, если её нет в PATH
+                                               # (AGENT_CLAUDE_BINARY, AGENT_AGY_BINARY)
 ```
 
 `AGENT_HOME` — это `CLAUDE_CONFIG_DIR` или `CODEX_HOME` подпроцесса, то есть каталог
@@ -251,7 +283,9 @@ result = worker.run({
 этом каталоге, и модель может его читать, но не менять: у Claude — инструменты `Read`,
 `Grep`, `Glob` и никаких настроек и хуков из `.claude` самого каталога
 (`--setting-sources user`), а каталог учётной записи — под запретом чтения; у Codex —
-`-C <каталог>` и песочница `read-only`, какой бы ни была в настройках. Каталога нет —
+`-C <каталог>`, песочница `read-only`, какой бы ни была в настройках, и из инструментов
+только shell; у agy — инструменты `view_file`, `grep_search`, `find_by_name`, `list_dir`,
+а файлы вне каталога он читать не даёт. Каталога нет —
 ошибка запроса (`ValueError`), ход не начинается, ещё до проверки входа и замеров.
 
 **Только доверенные каталоги.** «Только чтение» — это «не меняет», а не «не видит лишнего»:

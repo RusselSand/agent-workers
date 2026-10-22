@@ -10,7 +10,7 @@ from .stubs import cli_stub
 @pytest.fixture(autouse=True)
 def installed(monkeypatch):
     # Тесты не должны требовать установленных CLI: подсовываем существующий файл.
-    for name in ("AGENT_CLAUDE_BINARY", "AGENT_CODEX_BINARY"):
+    for name in ("AGENT_CLAUDE_BINARY", "AGENT_CODEX_BINARY", "AGENT_AGY_BINARY"):
         monkeypatch.setenv(name, cli_stub())
     monkeypatch.delenv("AGENT_EFFORT", raising=False)
 
@@ -111,3 +111,9 @@ def test_unknown_provider_is_named_not_guessed(tmp_path):
     settings = settings_at(tmp_path, "AGENT_PROVIDER=gemini")
     with pytest.raises(ValueError, match="gemini"):
         build(settings)
+
+
+def test_agy_is_a_provider_too(tmp_path):
+    worker = build(settings_at(tmp_path, "AGENT_PROVIDER=agy\nAGENT_MODEL=gemini-3.1-pro-high"))
+    assert worker.adapter.name == "agy"
+    assert worker.adapter.model == "gemini-3.1-pro-high"

@@ -1,0 +1,5 @@
+{"event":"init","conversation_id":"e2ab43e6-1ae0-4892-9a37-77f1e9deae26","init":{"cwd":"/runs/ход","agent":"aw-0123456789abcdef","tools":["manage_task","view_file"],"permission_mode":"request-review"}}
+{"event":"step_update","step_update":{"conversation_id":"e2ab43e6-1ae0-4892-9a37-77f1e9deae26","step_index":0,"state":"DONE","step_type":"user_input"}}
+{"event":"step_update","step_update":{"conversation_id":"e2ab43e6-1ae0-4892-9a37-77f1e9deae26","step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"готовый "}}
+{"event":"step_update","step_update":{"conversation_id":"e2ab43e6-1ae0-4892-9a37-77f1e9deae26","step_index":1,"state":"DONE","step_type":"agent_response","text_delta":"ответ\n","duration_seconds":0.0509,"usage":{"input_tokens":120,"output_tokens":46,"thinking_tokens":40,"cache_read_tokens":100,"total_tokens":166}}}
+{"event":"result","result":{"conversation_id":"e2ab43e6-1ae0-4892-9a37-77f1e9deae26","status":"SUCCESS","response":"готовый ответ\n","duration_seconds":0.0827,"num_turns":1,"usage":{"input_tokens":120,"output_tokens":46,"thinking_tokens":40,"cache_read_tokens":100,"total_tokens":166}}}
