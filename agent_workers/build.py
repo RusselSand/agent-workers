@@ -5,9 +5,9 @@ from __future__ import annotations
 from .base.contract import Profile
 from .base.worker import Worker
 from .config import Settings
-from .providers import ClaudeAdapter, CodexAdapter
+from .providers import AgyAdapter, ClaudeAdapter, CodexAdapter
 
-ADAPTERS = {"claude": ClaudeAdapter, "codex": CodexAdapter}
+ADAPTERS = {"claude": ClaudeAdapter, "codex": CodexAdapter, "agy": AgyAdapter}
 
 
 def build(settings: Settings | None = None) -> Worker:

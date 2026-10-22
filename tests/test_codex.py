@@ -1,17 +1,23 @@
 import json
 import os
+import tomllib
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
 from agent_workers.base import Entry, Profile
 from agent_workers.providers.codex import (
+    BARE_CATALOG,
+    QUIET,
+    READ_CATALOG,
     CodexAdapter,
     credits_of,
     rate_limits,
     rollout_windows,
     rpc_windows,
+    toml_string,
 )
 from agent_workers.providers.codex import (
     tokens_of as codex_tokens,
@@ -382,3 +388,73 @@ def test_without_a_workspace_the_sandbox_is_as_configured(tmp_path, profile):
     assert command.argv[command.argv.index("-s") + 1] == "workspace-write"
     assert "-C" not in command.argv
     assert command.cwd == entry.folder
+
+
+def option(argv, key):
+    """Значение ключа -c key=value из командной строки, или None."""
+    for index, value in enumerate(argv):
+        if value == "-c" and argv[index + 1].startswith(key + "="):
+            return argv[index + 1].split("=", 1)[1]
+    return None
+
+
+def test_system_replaces_the_builtin_instructions_and_stays_out_of_the_prompt(tmp_path, profile):
+    """Как в API: system — отдельным сообщением вместо инструкций Codex, user — как есть."""
+    entry = Entry(tmp_path, "run")
+    argv = adapter().ask(entry, {"user": "привет", "system": "Ты фильтр."}, profile).argv
+    assert entry.read("invocation/prompt.txt") == "привет"
+    assert entry.read("invocation/system.md") == "Ты фильтр."
+    path = tomllib.loads("v=" + option(argv, "model_instructions_file"))["v"]
+    assert Path(path) == (entry.folder / "invocation" / "system.md").resolve()
+    assert option(argv, "instructions") is None
+
+
+@pytest.mark.parametrize("system", [None, ""])
+def test_without_system_the_builtin_instructions_are_dropped(tmp_path, profile, system):
+    """Пустой файл инструкций Codex отвергает — поэтому пустая строка, а не файл."""
+    entry = Entry(tmp_path, "run")
+    argv = adapter().ask(entry, {"user": "привет", "system": system}, profile).argv
+    assert option(argv, "instructions") == '""'
+    assert option(argv, "model_instructions_file") is None
+    assert entry.read("invocation/system.md") == ""
+
+
+def test_without_a_workspace_the_turn_has_no_tools(tmp_path, profile):
+    argv = adapter().ask(Entry(tmp_path, "run"), {"user": "x"}, profile).argv
+    assert Path(tomllib.loads("v=" + option(argv, "model_catalog_json"))["v"]) == BARE_CATALOG
+    assert option(argv, "features.shell_tool") == "false"
+    for flag in QUIET:
+        assert flag in argv
+
+
+def test_a_workspace_turn_keeps_only_the_shell(tmp_path, profile):
+    """Читать файлы модели больше нечем: shell остаётся, остальные инструменты — нет."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    argv = adapter().ask(Entry(tmp_path, "run"), {"user": "x", "workspace": str(repo)}, profile).argv
+    assert Path(tomllib.loads("v=" + option(argv, "model_catalog_json"))["v"]) == READ_CATALOG
+    assert option(argv, "features.shell_tool") is None
+    for flag in QUIET:
+        assert flag in argv
+
+
+@pytest.mark.parametrize(("catalog", "shell"), [(BARE_CATALOG, "disabled"), (READ_CATALOG, None)])
+def test_catalogs_switch_off_the_tools_of_every_model(catalog, shell):
+    models = json.loads(catalog.read_text(encoding="utf-8"))["models"]
+    assert CodexAdapter.model in [model["slug"] for model in models]
+    for model in models:
+        assert model["tool_mode"] is None
+        assert model["apply_patch_tool_type"] is None
+        assert model["multi_agent_version"] is None
+        assert model["supports_search_tool"] is False
+        if shell:
+            assert model["shell_type"] == shell
+        else:
+            assert model["shell_type"] != "disabled"
+
+
+@pytest.mark.parametrize("value", [r"D:\PROJECTS\.agent\codex-рабочий\runs\ход\system.md",
+                                   "/runs/с пробелом/\"кавычки\"/system.md"])
+def test_paths_reach_codex_unchanged(value):
+    """-c разбирается как TOML: обратные слэши Windows там — экранирование."""
+    assert tomllib.loads("v=" + toml_string(value))["v"] == value

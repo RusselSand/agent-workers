@@ -30,6 +30,36 @@ log = logging.getLogger(__name__)
 ENV_HOME = "CODEX_HOME"
 
 APP_SERVER = ("app-server", "--listen", "stdio://")
+
+# Ход должен быть как запрос в API: наш system и наш user. Без этих ключей Codex добавляет
+# к запросу свои инструкции (песочница, окружение, скиллы, приложения, агенты) и описания
+# инструментов — около 13 тысяч токенов на «hi». Проверено записью запроса, codex-cli 0.163.0.
+QUIET = ("-c", "include_permissions_instructions=false",
+         "-c", "include_environment_context=false",
+         "-c", "include_apps_instructions=false",
+         "-c", "include_collaboration_mode_instructions=false",
+         "-c", "skills.include_instructions=false",
+         "-c", "skills.bundled.enabled=false",
+         "-c", "agents.enabled=false",
+         "-c", "project_doc_max_bytes=0",
+         "-c", 'web_search="disabled"',
+         "-c", "features.goals=false",
+         "-c", "features.view_image=false",
+         "-c", "tools.experimental_request_user_input.enabled=false",
+         "-c", "features.apps=false",
+         "-c", "features.plugins=false",
+         "-c", "features.tool_suggest=false",
+         "-c", "features.image_generation=false")
+
+# Часть инструментов (code-mode, apply_patch, shell) Codex берёт не из настроек, а из каталога
+# моделей, и ключом -c их не снять. Каталоги — models.json из codex-rs/models-manager той же
+# версии CLI, где у каждой модели tool_mode, apply_patch_tool_type и multi_agent_version — null,
+# а supports_search_tool — false. В bare ещё и shell_type = "disabled": ход без каталога —
+# только текст. В read shell остаётся: в ходе с каталогом модель читает файлы через него.
+# Каталог замещает список моделей целиком: новая модель или новая версия CLI — новый каталог.
+CATALOGS = Path(__file__).parent / "catalogs"
+BARE_CATALOG = CATALOGS / "codex-0.163.0-bare.json"
+READ_CATALOG = CATALOGS / "codex-0.163.0-read.json"
 SUBSCRIPTION = ("chatgpt", "chatgptAuthTokens")
 
 SOURCE = "openai, developers.openai.com/api/docs/pricing (снято 2026-09-21)"
@@ -47,6 +77,12 @@ PRICES = {
     "gpt-5.6-terra": price_of("2", "0.20", "12"),
     "gpt-5.6-luna": price_of("0.20", "0.02", "1.20"),
 }
+
+
+def toml_string(value: str) -> str:
+    """Строка для значения -c. Строка JSON — годная строка TOML: путь Windows с обратными
+    слэшами, пробелами и кириллицей доходит до Codex как есть."""
+    return json.dumps(value)
 
 
 def length(minutes) -> timedelta | None:
@@ -294,22 +330,33 @@ class CodexAdapter:
 
     def ask(self, entry, request: Mapping[str, object], profile: Profile) -> Command:
         system = str(request.get("system") or "")
-        user = str(request["user"])
-        # У Codex нет отдельного системного канала: инструкция идёт первой в том же тексте.
-        prompt = (system + "\n\n" + user).strip() if system else user
-        stdin = entry.write("invocation/prompt.txt", prompt)
+        stdin = entry.write("invocation/prompt.txt", str(request["user"]))
+        # Наш system заменяет встроенные инструкции Codex и уходит отдельным сообщением, а не
+        # в начале текста запроса. Пустой файл инструкций Codex отвергает, поэтому без system
+        # встроенные инструкции снимаются пустой строкой: ход без system — без system.
+        if system:
+            path = entry.write("invocation/system.md", system).resolve()
+            instructions = ("-c", "model_instructions_file=" + toml_string(str(path)))
+        else:
+            instructions = ("-c", 'instructions=""')
         model = str(request.get("model") or self.model)
         entry.update(model=model)   # в ответе Codex модели нет, помним её с момента запроса
         # С каталогом ход идёт в нём (-C), и песочница — только чтение, какой бы ни была в
-        # настройках: чужой каталог модель читает, но не меняет.
+        # настройках: чужой каталог модель читает, но не меняет. Из инструментов у такого хода
+        # остаётся только shell. Без каталога инструментов нет вовсе.
         place = common.workspace(request)
         sandbox = "read-only" if place else self.sandbox
+        catalog = READ_CATALOG if place else BARE_CATALOG
+        shell = () if place else ("-c", "features.shell_tool=false")
         argv = (self.executable, "-a", "never", "exec", "-s", sandbox,
                 *(("-C", str(place)) if place else ()),
                 "--ignore-user-config", "--skip-git-repo-check",
                 "-m", model, "--json",
                 "-o", str(entry.folder / "summary.txt"),
-                "-c", f'model_reasoning_effort="{self.effort}"', "-")
+                "-c", f'model_reasoning_effort="{self.effort}"',
+                *instructions,
+                "-c", "model_catalog_json=" + toml_string(str(catalog)),
+                *QUIET, *shell, "-")
         return Command(argv, self.environment(profile), place or entry.folder, stdin)
 
     def reply(self, entry, profile: Profile) -> Reply:

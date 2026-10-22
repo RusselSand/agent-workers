@@ -33,6 +33,15 @@ CONTROL = ("-p", "--input-format", "stream-json", "--output-format", "stream-jso
 
 MCP_OFF = "{\"mcpServers\":{}}"
 
+# Ход должен быть как запрос в API: наш system и наш user. Без этих переменных CLI
+# подклеивает к первому сообщению CLAUDE.md (учётки и всех каталогов выше рабочего),
+# автопамять и делает фоновые запросы. Флагами это не закрыть: автопамять, например,
+# --setting-sources не выключает. Проверено записью запроса, Claude Code 2.1.303–2.1.304.
+QUIET = {"CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
+         "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+         "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1"}
+
 # Уровни, которые понимает --effort. Без флага уровень выбирает сама CLI.
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
@@ -241,12 +250,23 @@ def absolute_rule(path: PurePath) -> str:
     return "/" + posix if posix.startswith("/") else "//" + posix
 
 
-def effort_settings(effort: str) -> str:
-    """Уровень effort для --settings. Переменная CLAUDE_CODE_EFFORT_LEVEL главнее флага --effort,
-    и если учётная запись задала её в env своего settings.json, флаг молча проигрывает. Настройки
-    из --settings старше пользовательских и грузятся при любом --setting-sources, так что та же
-    переменная оттуда перекрывает учётку: AGENT_EFFORT главнее (решение владельца, q-001)."""
-    return json.dumps({"env": {"CLAUDE_CODE_EFFORT_LEVEL": effort}}, separators=(",", ":"))
+def turn_settings(effort: str | None, *, hooks_off: bool) -> str | None:
+    """Всё, что ход передаёт через --settings, — одним JSON: второй такой флаг не дополнил бы первый.
+
+    Уровень effort: переменная CLAUDE_CODE_EFFORT_LEVEL главнее флага --effort, и если учётная
+    запись задала её в env своего settings.json, флаг молча проигрывает. Настройки из --settings
+    старше пользовательских и грузятся при любом --setting-sources, так что та же переменная
+    оттуда перекрывает учётку: AGENT_EFFORT главнее (решение владельца, q-001).
+
+    Хуки: в ходе с каталогом настройки учётной записи грузятся (--setting-sources user), а с ними
+    и её хуки — их вывод CLI подклеивает к запросу. disableAllHooks их выключает.
+    """
+    settings: dict = {}
+    if effort:
+        settings["env"] = {"CLAUDE_CODE_EFFORT_LEVEL": effort}
+    if hooks_off:
+        settings["disableAllHooks"] = True
+    return json.dumps(settings, separators=(",", ":")) if settings else None
 
 
 @dataclass
@@ -305,18 +325,22 @@ class ClaudeAdapter:
         # (токены входа) — под запретом чтения. Это не граница ОС: Read видит и файлы вне
         # каталога, а запреты по абсолютным путям в Claude Code пока ненадёжны, — так что
         # workspace — только доверенный каталог, см. README.
+        # Без каталога настроек с диска не нужно вовсе (--setting-sources ""), а без
+        # инструмента Skill — и списка скиллов со слеш-командами (--disable-slash-commands).
         place = common.workspace(request)
         tools = (("--tools", READ_ONLY, "--allowedTools", READ_ONLY, "--setting-sources", "user",
                   "--disallowedTools", f"Read({absolute_rule(profile.home)}/**)")
-                 if place else ("--tools", ""))
+                 if place else ("--tools", "", "--setting-sources", "", "--disable-slash-commands"))
         # Уровень effort — только у хода модели: вход, статус и замеры модель не зовут.
         # Флагу вторит --settings: иначе уровень из настроек учётной записи был бы главнее.
-        effort = (("--effort", self.effort, "--settings", effort_settings(self.effort))
-                  if self.effort else ())
+        effort = ("--effort", self.effort) if self.effort else ()
+        settings = turn_settings(self.effort, hooks_off=bool(place))
+        overrides = ("--settings", settings) if settings else ()
         argv = (self.executable, "-p", "--output-format", "stream-json", "--verbose",
-                "--model", model, *effort, *tools, "--strict-mcp-config", "--mcp-config", MCP_OFF,
+                "--model", model, *effort, *overrides, *tools,
+                "--strict-mcp-config", "--mcp-config", MCP_OFF,
                 "--system-prompt-file", str(system), "--no-session-persistence")
-        return Command(argv, self.environment(profile), place or entry.folder, stdin)
+        return Command(argv, {**self.environment(profile), **QUIET}, place or entry.folder, stdin)
 
     def reply(self, entry, profile: Profile) -> Reply:
         streamed, terminal, session = read_stream(entry.read("stdout.jsonl"))

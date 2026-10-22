@@ -193,6 +193,38 @@ def test_without_a_workspace_the_turn_has_no_tools(profile, tmp_path):
     assert command.cwd == entry.folder
 
 
+def test_without_a_workspace_nothing_is_loaded_from_disk(profile, tmp_path):
+    """Ход — как запрос в API: ни настроек и хуков с диска, ни списка скиллов и слеш-команд."""
+    argv = adapter().ask(Entry(tmp_path, "run"), {"user": "привет"}, profile).argv
+    assert argv[argv.index("--setting-sources") + 1] == ""
+    assert "--disable-slash-commands" in argv
+    assert "--settings" not in argv
+
+
+@pytest.mark.parametrize("folder", [None, "repo"])
+def test_the_turn_gets_no_memory_files_and_no_background_traffic(profile, tmp_path, folder):
+    """CLAUDE.md и автопамять CLI подклеивает к запросу сама, флагами их не закрыть."""
+    request = {"user": "x"}
+    if folder:
+        (tmp_path / folder).mkdir()
+        request["workspace"] = str(tmp_path / folder)
+    env = adapter().ask(Entry(tmp_path, "run"), request, profile).env
+    assert env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] == "1"
+    assert env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    assert env["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] == "1"
+    assert env["CLAUDE_CONFIG_DIR"] == str(profile.home)
+
+
+def test_a_workspace_turn_runs_no_hooks_of_the_account(profile, tmp_path):
+    """Настройки учётной записи в ходе с каталогом грузятся, но её хуки — нет: их вывод ушёл бы в запрос."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    argv = adapter().ask(Entry(tmp_path, "run"), {"user": "x", "workspace": str(repo)}, profile).argv
+    assert json.loads(argv[argv.index("--settings") + 1]) == {"disableAllHooks": True}
+    assert argv.count("--settings") == 1
+
+
 def test_a_workspace_is_read_only_and_ignores_its_own_settings(profile, tmp_path):
     """В каталоге модель читает и ищет, но не запускает и не правит; его .claude не грузится."""
     repo = tmp_path / "repo"
@@ -242,7 +274,8 @@ def test_effort_level_outranks_the_level_in_the_account_settings(profile, tmp_pa
     claude = ClaudeAdapter(executable=cli_stub(), effort="xhigh")
     argv = claude.ask(Entry(tmp_path, "run"), request, profile).argv
     settings = json.loads(argv[argv.index("--settings") + 1])
-    assert settings == {"env": {"CLAUDE_CODE_EFFORT_LEVEL": "xhigh"}}
+    assert settings["env"] == {"CLAUDE_CODE_EFFORT_LEVEL": "xhigh"}
+    assert argv.count("--settings") == 1   # хуки и уровень — в одном JSON
 
 
 @pytest.mark.parametrize("effort", [None, ""])
