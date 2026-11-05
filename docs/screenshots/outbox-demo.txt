@@ -1,0 +1,14 @@
+OFFLINE DEMO | FakeAdapter | no model calls or subscription usage
+
+1. Run task-0042       state=answered
+   Reply              Ready to implement.
+   Simulated window   10.0% -> 12.5%
+   Simulated API cost $0.01 USD
+   Pending results    1
+
+2. Retry task-0042     state=resumed
+   Same reply         True
+   Adapter invocations 1 (still one)
+
+3. Accept and collect entry removed
+   Pending results    0
