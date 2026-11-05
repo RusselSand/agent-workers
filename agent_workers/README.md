@@ -1,219 +1,130 @@
-# agent_workers
+# Configuration and integration guide
 
-Воркер поверх CLI с подпиской: подключается к одной названной учётной записи, умеет
-войти и выйти, проверяет расход подписки до и после хода и считает, во что тот же ход
-обошёлся бы по API.
+[Project overview](../README.md) · [Configuration](#configuration) · [CLI](#command-line-interface) · [Python API](#python-integration) · [Docker](#platforms-and-docker) · [Русская инструкция](README.ru.md)
 
-**Один воркер — одно подключение.** Реестра профилей нет и не будет: несколько учёток
-живут как несколько каталогов, и воркеру называют один. Нужны два воркера — будет два
-набора настроек (два `.env`, два контейнера, две службы), и друг о друге они не знают.
+agent-workers runs one turn through a subscription CLI, using one named account directory. It manages login, process supervision, usage measurements, normalized replies, and a local outbox. Several accounts mean several workers with separate settings; there is no shared profile registry.
 
-Пакет самодостаточен: только стандартная библиотека. Подключается зависимостью, как —
-в README репозитория. На нём построен обработчик задач Kromka `AGENT_TURN` в
-kromka-agent-worker.
+The package uses only the Python standard library. A live turn additionally requires Claude Code or Codex and a supported subscription account. For installation, see the [English quick start](../README.md#quick-start).
 
-**Боевой запуск — в докере на Linux** (см. «В докере»). На Windows воркер работает
-для разработки и отладки, но с известными ограничениями, которые чинить не будем:
+## Configuration
 
-- потомки CLI, пережившие её выход, не снимаются: на Windows дерево процессов
-  находится только через живого родителя, а для большего нужен Job Object;
-- права «только владельцу» на папки ходов и каталог учётной записи выставляются
-  только на Linux.
+The package searches for `.env` in the current directory and up to four parent directories. Precedence is **command-line overrides → environment → `.env` → defaults**. The [example file](.env.example) is in English.
 
-## Устройство
+| Setting | Purpose | Default |
+| --- | --- | --- |
+| `AGENT_PROVIDER` | `claude` or `codex`. | Required. |
+| `AGENT_HOME` | Provider account/credentials directory. | `~/.agent-worker/<provider>` |
+| `AGENT_MODEL` | Model identifier understood by the provider CLI. | Adapter default. |
+| `AGENT_EFFORT` | Reasoning effort for turns. | Claude: CLI default; Codex: `medium`. |
+| `AGENT_RUNS` | Persistent run folders and logs. | `<AGENT_HOME>/runs` |
+| `AGENT_REFUSE_ABOVE` | Refuse a new turn at this percentage of an applicable usage window. | `95`; empty disables the threshold. |
+| `AGENT_SPEND_CREDITS` | Allow a turn when a window is exhausted but provider credits remain or are unlimited. | `1`; set `0` to refuse. |
+| `AGENT_TIMEOUT` | Total turn timeout in seconds. | `3600`; empty disables. |
+| `AGENT_IDLE_TIMEOUT` | Maximum time without CLI output, in seconds. | `900`; empty disables. |
+| `AGENT_CLAUDE_BINARY` | Explicit path to the Claude Code executable. | Find on `PATH`. |
+| `AGENT_CODEX_BINARY` | Explicit path to the Codex executable. | Find on `PATH`. |
 
-Два уровня, и граница между ними проверяется тестом `tests/test_boundary.py`.
+Boolean values accept `1/true/yes` and `0/false/no` (also their supported Russian equivalents); invalid values fail configuration. Timeout values must be positive when supplied.
 
-**База (`base/`)** — механика, одинаковая для любой CLI: запуск и надзор за
-подпроцессом, диалог по stdio, папка хода с журналами на дозапись, политика лимитов,
-арифметика стоимости, цикл опроса. Меняется, только если меняется сама схема работы:
-ход перестаёт быть «один процесс — один ответ», подписочные CLI заменяются на HTTP
-API, задача перестаёт быть папкой с журналами.
+Relative paths in `.env` resolve from the directory containing that file. Paths supplied through environment variables or command flags resolve from the current working directory. This also applies to executable paths. Paths are converted to absolute paths when settings are loaded.
 
-**Провайдеры (`providers/`)** — что именно запустить и как прочитать вывод. Здесь
-живут флаги CLI, форматы JSONL, способ добыть расход и таблицы цен. Новый флаг,
-переименованное поле, третий провайдер — правка только здесь.
+### Account directories
 
-Шов описан в `base/contract.py`: `Command`, `Reply`, `Limits`, `Usage`, `Cost` и
-протокол `Adapter`.
+`AGENT_HOME` becomes `CLAUDE_CONFIG_DIR` or `CODEX_HOME` in the subprocess. Keep it outside your repository. It contains credentials and may contain session logs, prompts, and answers; files and directories are created with owner-only permissions on Linux.
 
-## Настройка
+To switch accounts, change `AGENT_HOME` and sign in to that directory. The previous directory retains its credentials. Two directories signed into the same account still share that account's subscription limits; independent windows require different accounts.
 
-Всё подключение — в `.env`, который ищется от текущего каталога вверх (образец —
-`.env.example`). Порядок старшинства: флаг команды, переменная окружения, файл,
-умолчание.
+### Reasoning effort
 
-```
-AGENT_PROVIDER=claude                          # claude | codex
-AGENT_HOME=D:/PROJECTS/.agent/claude-рабочий   # каталог учётной записи
-AGENT_MODEL=claude-opus-5                      # необязательно
-AGENT_EFFORT=high                              # необязательно, см. ниже
-AGENT_RUNS=...                                 # папки ходов, по умолчанию <HOME>/runs
-AGENT_REFUSE_ABOVE=95                          # не начинать ход при таком расходе окна
-AGENT_SPEND_CREDITS=1                          # 0 — стоять даже при остатке кредитов
-AGENT_TIMEOUT=3600                             # предел всего хода, с
-AGENT_IDLE_TIMEOUT=900                         # предел молчания CLI, с
-AGENT_CODEX_BINARY=...                         # путь к CLI, если её нет в PATH
-```
+Claude accepts `low`, `medium`, `high`, `xhigh`, and `max`. The adapter validates these when building the worker and passes effort only to turn commands, not login or usage probes. It also supplies an explicit settings override so `AGENT_EFFORT` takes precedence over the account's effort setting; organization-managed settings can still take precedence.
 
-`AGENT_HOME` — это `CLAUDE_CONFIG_DIR` или `CODEX_HOME` подпроцесса, то есть каталог
-с токенами входа. Он лежит вне репозитория, это проверяется тестом. Относительные
-пути — и к каталогу, и к исполняемому файлу CLI — приводятся к абсолютным при
-загрузке: команды запускаются из разных каталогов, и относительный путь означал бы
-в каждой из них своё. Путь из `.env` считается от каталога самого `.env` (файл
-ищется вверх по дереву, так что из любого подкаталога это один и тот же каталог),
-путь из переменной окружения или флага — от текущего каталога.
+Codex receives the value as `model_reasoning_effort`. The model/CLI decides which values it supports. An empty effort setting means use the provider default.
 
-`AGENT_EFFORT` — сколько модель думает над ходом. У Claude уровень уходит в CLI флагом
-`--effort` только в команде хода: вход, статус и замеры расхода его не получают. Годятся
-`low`, `medium`, `high`, `xhigh`, `max`; другое значение — ошибка настройки при сборке
-воркера, а не отказ CLI в каждом ходе. Без настройки флага нет, и уровень выбирает сама
-CLI: у Opus 5.5 это `medium`, у Opus 5 был `high`. У Codex значение уходит в
-`model_reasoning_effort` как есть — какие уровни понимает модель, решает Codex; без
-настройки — `medium`. Пустое значение — то же, что не задано.
+### Limit policy
 
-Уровень, заданный в настройках самой учётной записи Claude (`CLAUDE_CODE_EFFORT_LEVEL` в
-`env` файла `settings.json` в `AGENT_HOME`), CLI ставит выше флага `--effort`. Поэтому ход
-передаёт тот же уровень ещё и в `--settings`: эти настройки старше пользовательских и
-перекрывают учётку. Выше них только управляемые настройки организации. Решение владельца
-(q-001): «AGENT_EFFORT главнее: ход дополнительно передаёт уровень так, чтобы перекрыть
-настройку учётки».
+For Python callers, `LimitPolicy` also exposes:
 
-Окно лимитов принадлежит **учётной записи, а не каталогу**. Отдельный каталог с тем же
-аккаунтом внутри даёт то же самое окно — воркер будет есть то же, что и вы. Чтобы
-окна были разные, в каталоге воркера нужен другой аккаунт.
+| Field | Purpose |
+| --- | --- |
+| `before`, `after` | Enable measurements before/after a turn. |
+| `refuse_above` | Refusal threshold; `None` disables it. |
+| `spend_credits` | Allow provider credits when subscription windows are exhausted. |
+| `settle_reads`, `settle_delay` | Re-read usage after the turn to allow delayed accounting to catch up. |
+| `stale_after`, `on_unknown` | Handle old or unavailable measurements. |
 
-**Сменить аккаунт** — назвать другой каталог в `AGENT_HOME` и войти. Прежний остаётся
-со своими токенами, так что вернуться к нему значит вернуть прежний путь, без
-повторного входа.
+Disabling measurements with `before=False, after=False` also disables limit-based refusal. Total/inactivity timeouts belong to `Worker` as `timeout` and `idle`; use `None` to disable either.
 
-## Команды
+## Command-line interface
 
-Из каталога проекта, в который пакет установлен (`.env` ищется от текущего каталога):
+Run commands in the project where the package is installed:
 
 ```bash
-uv run python -m agent_workers status     # вход и расход подписки
-uv run python -m agent_workers login      # вход в учётную запись
+uv run python -m agent_workers login
+uv run python -m agent_workers status
 uv run python -m agent_workers logout
-uv run python -m agent_workers run "ответь одним словом: ок"
-uv run python -m agent_workers pending    # готовые результаты, которых не забрали
+uv run python -m agent_workers run "Reply with one word: ready"
+uv run python -m agent_workers pending
+uv run python -m agent_workers collect task-0042
 uv run python -m agent_workers collect --all
 ```
 
-`pending` и `collect` работают без установленной CLI: они только разбирают уже
-сохранённые папки, поэтому забрать накопленное можно, даже когда провайдер снесён
-или сломан обновлением.
+`login` opens an interactive provider sign-in flow; choose subscription sign-in for the account. `status` checks login and reads usage without asking a model. `pending` and `collect` inspect stored run folders and work even when the provider CLI is unavailable.
 
-Любую настройку можно назвать флагом, не трогая `.env`:
-`--provider codex`, `--home <путь>`, `--model gpt-5.6-luna`, `--effort high`.
-
-Каждая команда первой строкой печатает, с каким подключением работает. Ответ идёт в
-stdout, всё остальное — в stderr, поэтому ответ можно перенаправить в файл:
-
-```
-подключение: claude · D:\PROJECTS\.agent\claude-рабочий
-ок
-
-токены: вход 9 · из кеша 0 · в кеш 0 · выход 42
-по API: $0.0231 (cli)
-окно session: 12.0% -> 12.4% (+0.4)
-```
-
-Каждый `run` — новый ход, даже если текст тот же: у ручного запуска нет задачи от
-координатора, и папка получает случайное имя. Ответ напечатан — значит доставлен,
-поэтому папка сразу удаляется. Если ход оборвался, папка остаётся для разбора, и
-команда печатает, где она лежит и как её убрать.
-
-Перед тратой можно посмотреть, что именно будет запущено:
+Override connection settings per command:
 
 ```bash
-uv run python -m agent_workers run --dry-run "ответь одним словом: ок"
+uv run python -m agent_workers status --provider codex --home ../agent-accounts/codex
+uv run python -m agent_workers run --provider codex --effort high "Summarize the request."
 ```
 
-`--dry-run` собирает ход во временном каталоге, печатает командную строку и содержимое
-файлов задания и ничего не запускает. Каталог удаляется сразу, так что пути в
-командной строке — только для наглядности; ни папка ходов, ни диск тексты заданий не
-копят. Длинное задание подаётся
-через `-` (читается со stdin), системная инструкция — через `--system-file`. Вход
-проверяется до хода: без него команда откажется работать и скажет, чем чинить, вместо
-невнятной ошибки от самой CLI.
+Commands print their connection details to stderr. A turn's reply goes to stdout, with usage and diagnostic information on stderr, so it can be redirected:
 
-## Папка хода — исходящий лоток
-
-Воркер — исполнитель задач координатора. **Уникальность задачи, аренда и решение о
-повторе — забота координатора**, воркер за это не отвечает. Его забота одна:
-оплаченный ответ не должен потеряться, пока его не забрали.
-
-Поэтому ключ хода — идентификатор задачи, и он обязателен. Из текста запроса ключ не
-выводится: одинаковый текст в двух задачах — две задачи, а не одна.
-
-Папка живёт не по таймеру, а **пока результат не заберут**: воркер сам не решает,
-сколько хранить, это решает тот, кто забирает.
-
-```python
-result = worker.run(request, key=job_id)   # ответ готов, папка лежит как лоток
-...                                        # координатор принял результат
-worker.collect(result["entry"])            # забрали — папку сносим целиком
+```bash
+uv run python -m agent_workers run "Reply with one word: ready" > answer.txt
 ```
 
-Если результат не удалось отдать — координатор недоступен, процесс упал, — задача
-вернётся с тем же ключом, и ответ из папки отдастся даром, без второго платного хода.
-Отсюда следует, что доставка получается «хотя бы один раз» — приём на той стороне
-обязан быть идемпотентным.
+CLI help and diagnostic messages currently use Russian. The commands and flags above are unchanged across languages; the prompt controls the language requested from the model.
 
-Что вернётся при повторном заходе с тем же ключом:
+### Preview a turn
 
-| в папке | состояние |
-|---|---|
-| готовый ответ | `resumed` — без замера лимита, без входа и без запуска |
-| живой процесс этого хода | `in_progress`, папку никто не трогает |
-| что-то другое: пусто или след оборванной попытки | ход делается заново, с чистой папки |
+```bash
+uv run python -m agent_workers run --dry-run "Reply with one word: ready"
+```
 
-Готовый ответ ищется в журнале, а не только в состоянии: если процесс умер между
-ответом CLI и записью состояния, ответ всё равно отдастся. Всё остальное — повтор:
-раз задачу выдали снова, значит, координатор решил её повторить.
+A dry run prints the provider command and task-file contents without starting the provider process or checking login. It builds the request in a temporary directory, then deletes it. Paths printed in this preview are illustrative and no longer exist afterwards.
 
-Владельца определяет замок операционной системы на файле внутри папки, а не
-записанный PID. Это страховка поверх аренды координатора: замок снимается сам, когда
-процесс умер или контейнер перезапустили, поэтому брошенную работу не спутать с идущей,
-а `collect` не снесёт журналы живого хода. Замки не работают между машинами через
-сетевой диск: одна папка ходов — одна машина.
+For a long prompt, use `-` to read stdin. Pass a system instruction with `--system-file`:
 
-`worker.pending()` перечисляет всё, чем никто не занят: готовые ответы и следы
-оборванных ходов. Невидимых папок хода нет — любую можно увидеть и забрать. Папку хода
-узнают по её файлам (замок или состояние), так что чужие каталоги рядом не трогаются,
-даже если `AGENT_RUNS` по ошибке указывает на каталог учётной записи.
+```bash
+uv run python -m agent_workers run --system-file instructions.txt - < prompt.txt
+```
 
-## Встраивание в другой код
+Every manual `run` uses a new random key. Printing a successful reply counts as delivery, and its run folder is removed immediately. An interrupted turn retains its folder and prints its location and cleanup command. For keyed recovery, use the Python API.
 
-Пакет — как HTTP-клиент: принимает запрос, возвращает результат. Он **не** ходит в
-сеть за заданиями, **не** отдаёт ответы наружу, **не** ведёт журнал и **не** хранит
-историю. Всё это делает вызывающий код, и воркер о нём ничего не знает.
+## Python integration
 
-Зависимостей нет: только стандартная библиотека и установленная CLI провайдера.
-В подпроцесс уходит короткий список переменных окружения — в нём есть прокси и
-корпоративные сертификаты (`HTTPS_PROXY`, `NODE_EXTRA_CA_CERTS` и подобные), но нет
-секретов вашего проекта.
-
-### Собрать воркера
+### Build a worker
 
 ```python
 from agent_workers import build
 
-worker = build()          # подключение из .env: провайдер, каталог учётной записи, модель, effort
-worker.check()            # вход в подписку, иначе исключение
+worker = build()
+worker.check()  # Raises if subscription login cannot be confirmed.
 ```
 
-Если настройки приходят из вашего конфига, а не из файла:
+Or supply settings explicitly:
 
 ```python
 from agent_workers import Settings, build
 
-worker = build(Settings().override(provider="codex", home="/data/account",
-                                   model="gpt-5.6-luna"))
+worker = build(Settings().override(
+    provider="codex",
+    home="/data/account",
+    model="gpt-5.6-luna",
+))
 ```
 
-Или совсем явно, минуя настройки:
+To construct the underlying components directly:
 
 ```python
 from pathlib import Path
@@ -221,267 +132,145 @@ from pathlib import Path
 from agent_workers.base import LimitPolicy, Profile, Worker
 from agent_workers.providers import CodexAdapter
 
-worker = Worker(CodexAdapter(model="gpt-5.6-luna", effort="low"),
-                Profile("codex-worker", Path("/data/account")),
-                Path("/data/runs"),
-                LimitPolicy(refuse_above=80))
+worker = Worker(
+    CodexAdapter(model="gpt-5.6-luna", effort="low"),
+    Profile("codex-worker", Path("/data/account")),
+    Path("/data/runs"),
+    LimitPolicy(refuse_above=80),
+)
 ```
 
-`LimitPolicy` управляет замерами: `before` / `after` — делать ли их вообще,
-`refuse_above` — порог отказа (`None` снимает), `spend_credits` — работать ли при
-выбранном окне, если провайдер сообщает остаток кредитов, `settle_reads` /
-`settle_delay` — сколько раз и с какой паузой перечитывать расход после хода,
-`stale_after` / `on_unknown` — что делать с устаревшим или неизвестным замером.
+Model identifiers in these examples must be available to your CLI/account; change them to your deployment's supported model.
 
-Пределы хода — поля самого `Worker`: `timeout` (весь ход, по умолчанию час) и `idle`
-(молчание CLI, по умолчанию 15 минут), в секундах; `None` снимает предел.
-
-### Сделать ход
+### Make a turn
 
 ```python
-result = worker.run({
-    "user": "текст задания",          # обязательно
-    "system": "инструкция",           # необязательно
-    "model": "gpt-5.6-luna",          # необязательно: иначе модель из настроек
-    "workspace": "/repos/project",    # необязательно: каталог, который модель читает
-}, key=job_id)
+result = worker.run(
+    {
+        "user": "Identify the acceptance criteria.",
+        "system": "Answer in English and keep each criterion testable.",
+        "model": "gpt-5.6-luna",
+        "workspace": "/repos/project",
+    },
+    key="task-0042",
+    ensure_login=True,
+)
 ```
 
-Без `workspace` у модели нет инструментов: ход — только текст запроса. С ним ход идёт в
-этом каталоге, и модель может его читать, но не менять: у Claude — инструменты `Read`,
-`Grep`, `Glob` и никаких настроек и хуков из `.claude` самого каталога
-(`--setting-sources user`), а каталог учётной записи — под запретом чтения; у Codex —
-`-C <каталог>` и песочница `read-only`, какой бы ни была в настройках. Каталога нет —
-ошибка запроса (`ValueError`), ход не начинается, ещё до проверки входа и замеров.
+Only `user` is required in the request. `system`, `model`, and `workspace` are optional. An absent `model` uses the adapter's model. Each turn starts a new conversation; this API does not continue sessions.
 
-**Только доверенные каталоги.** «Только чтение» — это «не меняет», а не «не видит лишнего»:
-Claude Code читает и файлы вне рабочего каталога, а запреты по абсолютным путям у него пока
-ненадёжны; песочница `read-only` у Codex читает весь диск. Инструкция, спрятанная в коде
-каталога, может заставить модель прочитать то, что ей не положено, — в том числе токены
-учётной записи, — и вернуть это в ответе. Давайте `workspace` только со своим кодом; для
-чужого нужна изоляция уровня ОС: отдельный контейнер, где смонтированы только каталог и
-учётная запись этой модели.
+| Keyword argument | Behavior |
+| --- | --- |
+| `key` | Required task identifier, also used for the run folder. Do not derive it from prompt text. |
+| `stop` | Callable returning whether to stop; supervision preserves captured output. |
+| `ensure_login` | Check login only when a fresh turn is needed. A completed saved answer can be resumed without login. |
 
-Ход — вопрос и ответ. Беседы не продолжаются: каждый ход начинается с чистого листа,
-а Claude и вовсе не сохраняет сессию, чтобы каталог учётной записи не рос.
+Without a workspace, the turn has no tools. With one, the provider runs in that directory with read-only inspection enabled: Claude uses `Read`, `Grep`, and `Glob`, with workspace-local settings/hooks excluded; Codex uses `-C` and a `read-only` sandbox. A nonexistent workspace is rejected before login checks and usage measurements.
 
-Именованные параметры `run()`:
+Read-only access prevents edits; it does not isolate the filesystem. Claude and Codex may read outside the working directory. Use trusted code, or an OS-level isolated container with only the necessary mounts when inspecting untrusted material.
 
-| параметр | зачем |
-|---|---|
-| `key` | обязательно: идентификатор задачи, он же имя папки хода |
-| `stop` | вызываемое «пора останавливаться»: ход свернётся, сохранив полученное |
-| `ensure_login` | проверить вход, но только если ход действительно нужен: готовый ответ из лотка отдаётся и без входа |
+### Inspect the result
 
-После хода, прерванного по `stop`, замер «после» не делается: аккуратная остановка не
-должна ждать пауз и запусков CLI. Ход, прерванный иначе — `Ctrl+C`, падение разбора, —
-тоже попадает в лоток как `incomplete`, а не зависает занятым местом.
+| Field | Contents |
+| --- | --- |
+| `state` | Outcome of the attempt; see below. |
+| `reply` | `Reply` with `.text`, `.complete`, `.diagnostic`, `.model`, or `None`. |
+| `tokens` | Normalized usage: `.input`, `.cached_input`, `.cache_write`, `.output`, `.reasoning`. |
+| `cost` | Equivalent API price: `.amount`, `.currency`, `.source`, `.parts`, or `None`. |
+| `before`, `after` | Subscription measurements, or `None`. |
+| `spent` | Measured usage-window deltas, such as `{"session": 0.4}`. |
+| `reason` | Reason the turn was refused or interrupted, when available. |
+| `entry` | Run entry with `.folder` and `.meta`. Interruption metadata can be `stopped`, `timeout`, or `idle`. |
 
-Зависшую CLI снимают два предела (`AGENT_TIMEOUT`, `AGENT_IDLE_TIMEOUT`). Главный — предел
-молчания: CLI ни строки не пишет в журналы хода. Работающая модель пишет событие на каждый
-вызов инструмента и каждое сообщение, а зависшая молчит. Предел с запасом, потому что
-пословного вывода нет, и модель может молчать, пока долго думает или пишет большой ответ.
-Предел всего хода — страховка от CLI, которая пишет, но не двигается, например бесконечно
-переподключается. Он нарочно щедрый: снятый ход уже оплачен, а повтор его не возьмёт. Ход,
-снятый по пределу или по `stop`, — `incomplete`, и `reason` говорит, почему его сняли.
+| State | Meaning | Caller action |
+| --- | --- | --- |
+| `answered` | A fresh turn returned a complete answer. | Accept/persist the result, then collect. |
+| `resumed` | A complete answer was recovered from the outbox. No new turn. | Accept/persist it idempotently, then collect. |
+| `incomplete` | CLI error, parsing failure, interruption, or timeout after launch. | Report the failure and diagnostics. Let the coordinator decide whether to retry. |
+| `in_progress` | Another live process owns this key. | Leave the folder alone. |
+| `limit_reached` | Usage policy refused the turn before launch. | Requeue according to the reset time in `before`; no run folder remains. |
+| `aborted` | A stop request arrived before CLI launch. | Return/requeue the task; no paid turn started and no folder remains. |
 
-### Что лежит в результате
+A total timeout catches an active but unproductive CLI; the idle timeout catches a CLI that stops writing to its logs. Both are intentionally generous because a long reasoning step can be silent. A turn interrupted by `stop` skips the after-measurement so shutdown does not wait for additional probes and settlement delays.
+
+Pre-launch failures raise exceptions and leave no run folder: invalid requests, `LoginRequired` (a `RuntimeError` subclass), and `LaunchError` (an `OSError` subclass). Failures after launch generally return `incomplete`, including output-parsing errors with `reply.diagnostic` starting with `reply_error:`. Keyboard interrupts still propagate while preserving an interrupted launched turn for inspection.
+
+### Outbox and acknowledgement
 
 ```python
-result["state"]      # см. таблицу ниже
-result["reply"]      # .text .complete .diagnostic .model
-result["tokens"]     # .input .cached_input .cache_write .output .reasoning
-result["cost"]       # .amount .currency .source .parts — во что обошлось бы по API
-result["before"]     # расход подписки до хода, или None
-result["after"]      # и после
-result["spent"]      # {"session": 0.4} — сколько процентов окна съел ход
-result["reason"]     # почему ход не состоялся или почему его сняли
-result["entry"]      # папка хода: .folder, .meta; .meta["interruption"] — stopped | timeout | idle
+result = worker.run(request, key=job_id, ensure_login=True)
+# Persist/deliver the result to your receiver here.
+worker.collect(result["entry"])  # Only after the receiver accepts it.
 ```
 
-| состояние | что случилось | что делать |
-|---|---|---|
-| `answered` | ход прошёл, ответ получен | отдать результат, затем `collect` |
-| `resumed` | ответ взят из лотка, ничего не потрачено | то же самое |
-| `incomplete` | ход оборвался: предел хода или молчания, остановка, падение или ошибка CLI | отдать как неудачу: `reason` и `reply.diagnostic` (у ошибки CLI там её текст, а токены уже потрачены и посчитаны), затем `collect`. Повтор решает координатор |
-| `in_progress` | задачу с этим ключом прямо сейчас делает другой процесс | ничего; при живой аренде такого не бывает |
-| `limit_reached` | подписка исчерпана, ход не начинался | вернуть задачу до сброса окна (время сброса — в `before`), папки не осталось |
-| `aborted` | остановку попросили до запуска CLI; ход не начинался | вернуть задачу: платный ход не стартовал, папки не осталось |
+The outbox retains a run until the caller collects it, with no automatic retention timer. A completed answer is recovered from the captured output, even if the process died before recording the final state.
 
-Исключения `run()` — это отказ **до** хода, деньги не потрачены, папки не остаётся.
-Неверный запрос (нет `user`) поднимает ошибку провайдера, неподтверждённый вход —
-`LoginRequired` (подкласс `RuntimeError`), а CLI, которая не смогла запуститься (файла нет, нет прав), —
-`LaunchError`, подкласс `OSError`. Граница проведена по факту запуска: что бы ни
-сломалось до старта процесса, включая открытие журналов, — это отказ до хода.
-Остальное приходит состоянием, а не исключением — в том числе сбой разбора вывода
-CLI: ход уже оплачен, поэтому он становится `incomplete` с
-`reply.diagnostic = "reply_error: …"`, а не роняет воркер при каждом чтении папки.
+A repeated key returns a saved complete answer before checking login or measuring limits. An incomplete attempt without a saved complete answer is started again when the coordinator retries that key; it can consume subscription allowance again. After collection, no saved result remains for that key.
 
-### Забрать результат
+`worker.pending()` lists unowned entries, including completed answers and interrupted attempts. `collect()` deletes a folder under its operating-system lock; it raises `Busy` when the entry is running and `NotRemoved` if cleanup fails. A failed cleanup means the result may appear again. Do not delete run folders manually.
+
+Outbox inspection can be independent of the provider CLI:
 
 ```python
-for entry in worker.pending():        # готовое, что ещё не забрали
-    send(entry)
-    worker.collect(entry)             # забрали — папку сносим
-```
-
-`collect` бросает `Busy`, если папку занял живой ход, и `NotRemoved`, если снести не
-удалось — второе означает, что результат всплывёт снова, и его нельзя считать
-доставленным.
-
-Разбирать лоток можно и без CLI провайдера — например, в процессе, который только
-дошлёт накопленное:
-
-```python
+from pathlib import Path
 from agent_workers.base.outbox import Outbox
 
-for entry in Outbox(Path("/data/runs")).pending():
-    ...
+outbox = Outbox(Path("/data/runs"))
+for entry in outbox.pending():
+    print(entry.folder.name, entry.outcome)
 ```
 
-### Встройка в координатор
+Locks apply on one machine. Do not use one run directory across multiple hosts over a network filesystem. Rely on the public result and entry metadata instead of parsing internal journal files, whose format follows the CLI versions.
 
-Воркер — обработчик задачи. Брать задачу из очереди, получать и продлевать аренду,
-отчитываться координатору — дело runtime, который общается с очередью и
-координатором; воркер о них ничего не знает.
+### Coordinator responsibilities
+
+Your runtime claims tasks, maintains leases, reports results, and schedules retries. Keep the lease alive for **all of `run()`**, including login checks and before/after measurements, which can be slow.
 
 ```python
 from agent_workers.base import run_loop
 
-def tick(stop):                               # цикл передаёт признак остановки внутрь
-    job = claim()                             # координатор выдал задачу и аренду
+# claim(), renewing(), and complete() belong to your application/runtime.
+def tick(stop):
+    job = claim()
     if job is None:
         return
-    with renewing(job):                       # аренда продлевается всё время обработки
-        result = worker.run(job["request"],
-                            key=job["id"],                   # ключ хода — id задачи
-                            stop=stop.is_set,                # сигнал доходит до самого хода
-                            ensure_login=True)
-        accepted = complete(job, result)      # отчитаться, пока аренда жива
-    if accepted:                              # координатор принял результат —
-        worker.collect(result["entry"])       # только теперь папку можно снести
+    with renewing(job):
+        result = worker.run(
+            job["request"], key=job["id"], stop=stop.is_set, ensure_login=True,
+        )
+        accepted = complete(job, result)
+    if accepted and result["state"] in {"answered", "resumed", "incomplete"}:
+        worker.collect(result["entry"])
 
-run_loop(tick, poll_seconds=15)               # останавливается по SIGINT и SIGTERM
+run_loop(tick, poll_seconds=15)
 ```
 
-Так устроен обработчик `AGENT_TURN` в kromka-agent-worker, только цикл, аренду и отчёт
-ведёт runtime `kromka_worker`: см. там `handlers/agent_turn.py`.
+The example is an integration sketch: implement the three application functions for your queue and receiver. Delivery is at least once, so acceptance must be idempotent by task ID. Persist long-term history in your own storage. If delivery fails, leave the entry in the outbox so the same key can recover it.
 
-Аренду продлевают на **всё** время `run()`, а не только пока идёт CLI: проверка входа и
-замеры лимита до и после хода при медленном провайдере занимают минуты. Если аренда
-истечёт, координатор отдаст задачу другому, а результат первого отвергнет.
+## Usage and cost
 
-Если `complete` не прошёл, папка остаётся: координатор вернёт задачу, и повторный
-`run` с тем же ключом отдаст готовый ответ даром.
+Both adapters read subscription usage without asking the model:
 
-### Обязанности вызывающего
+| Provider | Primary mechanism | Fallback |
+| --- | --- | --- |
+| Claude | `get_usage` control request over stdio. | Human-readable `/usage`. |
+| Codex | `app-server`: initialize, account/read, account/rateLimits/read. | Session rollout `token_count` snapshot. |
 
-- **Давать ключ задачи и держать аренду.** Одну задачу в один момент делает один
-  процесс — это гарантирует аренда координатора. Продлевает её runtime, на всё время
-  обработки задачи.
-- **Решать о повторе.** Вызов с ключом, по которому нет готового ответа, делает ход
-  заново и снова тратит подписку. Сколько раз повторять — решает координатор.
-- **Забирать результаты.** Папка живёт, пока её не забрали: `collect` — после того,
-  как результат принят.
-- **Принимать повторы.** Доставка «хотя бы один раз»: приём должен быть
-  идемпотентным по идентификатору задачи.
-- **Решать про историю.** Если ответы нужны надолго — это ваша база, не папки
-  воркера.
-- **Не читать внутренности папки.** `agent-entry.json`, `stdout.jsonl` и прочее — рабочие
-  файлы, их формат меняется вместе с CLI. Пользуйтесь `result` и `entry.meta`.
-- **Один воркер — одно подключение.** Нужны два — соберите двух, с разными
-  каталогами учётных записей; общего состояния у них нет.
-- **Держать `AGENT_HOME` вне репозитория.** Там токены входа, журналы сессий Codex и
-  папки ходов с текстами запросов и ответов. Каталоги и файлы создаются с правами
-  только для владельца, но на общей машине их лучше не держать там, куда ходят все.
+Measurements preserve their original timestamps. Fallback snapshots may be marked inexact; stale inexact data is handled by `stale_after` and `on_unknown`. Only windows relevant to the selected turn model are used. A reset during a turn does not become negative usage. After-measurements can be repeated to allow delayed usage accounting to settle.
 
-### Чего делать не нужно
+Window values may be rounded to whole percentages; a short turn can report zero change. Provider credit availability can permit a turn even when a subscription window is exhausted, depending on `spend_credits`.
 
-- Не выводить ключ из текста запроса: одинаковый текст в двух задачах — две задачи.
-- Не удалять папки мимо `collect` — он единственный делает это под замком.
-- Не запускать двух воркеров на одном каталоге ходов с разных машин: замки работают
-  в пределах одной.
-- Не считать `spent` точным для коротких ходов: провайдеры отдают целые проценты.
+Token counts separate fresh input, cache reads, cache writes, and output. Reasoning is already included in output and is not charged twice. Codex cached input is subtracted from its total input, while Claude already reports the fresh-input remainder. Codex turn usage is read from rollout data, with streamed output as a fallback.
 
-## Расход подписки
+The cost is a comparison against API pricing, not a subscription charge. Claude's own reported value uses `source="cli"`; Codex uses the adapter's versioned model-price table. An unknown model price returns `None`. Review tables when prices or supported models change.
 
-Замер делается до и после каждого хода (`LimitPolicy.before/after`, включены по
-умолчанию), разница между ними — цена хода в процентах окна. Оба провайдера читают
-расход без единого обращения к модели:
+## Platforms and Docker
 
-| | как читается | что даёт |
-|---|---|---|
-| Claude | управляющий запрос `get_usage` по stdio | окна `limits[]` с точным временем сброса |
-| Codex | `app-server`: `initialize` → `account/read` → `account/rateLimits/read` | все корзины лимитов, план, остаток кредитов |
+Production use targets Linux, commonly inside Docker. On Windows, development works, but surviving CLI descendants cannot always be cleaned up after their parent exits, and owner-only file permissions are not enforced as on Linux. Linux-only process/permission tests are skipped on Windows.
 
-Запасные пути на случай, если протокол в новой версии CLI отвалится: у Claude —
-человекочитаемый `/usage` (без года в дате сброса), у Codex — снимок `token_count`
-из роллаута сессии. Оба помечаются в `Limits.source`, а снимок из чужой сессии ещё
-и `exact=False`.
+Sign in on the host first, then mount the account directory into the container and point `AGENT_HOME` at that mount. Login is interactive and a headless container does not supply the browser. Mount the runs directory persistently as well if it is outside the account mount.
 
-У снимка сохраняется **его собственное время**, а не время чтения: роллаут может быть
-вчерашним, и выдавать его за сейчас нельзя — на возрасте замера держится решение,
-начинать ли ход. Устаревший неточный замер политика считает неизвестным
-(`stale_after`, `on_unknown`).
-
-Окон лимита несколько, и часть привязана к конкретной модели. Считаются те, что
-относятся к модели **этого хода** (`request["model"]`, иначе модель адаптера): общее
-окно на весь аккаунт — всегда, окно чужой модели — никогда. У Codex общая корзина на
-100% не запрещает ход модели, у которой своя пуста; у Claude выбранное окно Sonnet не
-останавливает ход Opus.
-
-Разница окон не считается, если окно за время хода обнулилось: отрицательная величина
-там означает новый отсчёт, а не расход.
-
-Замер можно выключить политикой (`before=False`, `after=False`) — тогда воркер не
-отказывает по лимиту, даже если неизвестный лимит настроен как повод для отказа.
-
-Выбранное окно — не всегда стоп: если провайдер сообщает остаток кредитов или
-безлимит, работа идёт за них (`AGENT_SPEND_CREDITS`). Замер «после» читается несколько раз с паузой —
-учёт расхода догоняет вызов не мгновенно (`settle_reads`, `settle_delay`).
-
-`Limits.windows` — список с произвольными именами окон. Как только в базе появится
-поле под конкретное окно конкретной CLI, база начнёт знать о провайдере.
-
-## Токены и стоимость
-
-`result["tokens"]` показывает, из чего сложился ход: свежий вход, чтение из кеша,
-запись в кеш, выход (рассуждения уже внутри выхода и отдельно не оплачиваются).
-`result["cost"]` — во что тот же ход обошёлся бы по API, с разбивкой по частям.
-
-Подписка оплачена отдельно, поэтому это не счёт, а линейка: она показывает, дорого ли
-обходится конкретный тип задачи.
-
-Claude считает стоимость сам и сообщает её в ответе — тогда берётся его число
-(`cost.source == "cli"`). Codex своей цены не сообщает, поэтому она берётся из таблицы
-провайдера; `cost.source` всегда называет источник и дату, а незнакомая модель даёт
-`None` вместо выдуманного числа.
-
-Цены — в `providers/*.py`, рядом с остальным знанием о провайдере. Их нужно
-пересматривать: у `gpt-5.6-sol` цена акционная и объявлена до 21 ноября 2026.
-
-Считать токены по-честному оказалось не так прямо, и обе поправки проверены живыми
-ходами:
-
-- **Расход хода Codex берётся из роллаута.** Событие `turn.completed` отдаёт
-  накопленный итог всей сессии, а не расход хода: в продолженной сессии второй ход
-  показал 27369 входных при собственных 13773. Сейчас каждый ход — новая сессия, и
-  цифры совпадают, но расход читается из роллаута (`last_token_usage`) — так он верен
-  в обоих случаях; поток остаётся запасным вариантом.
-- **Кеш у Codex входит во вход.** В ходе с попаданием в кеш: 13948 входных, из них
-  13056 кешированных, при 13596 полностью свежих на первом ходе той же беседы. Значит
-  кеш — часть входа, и его вычитают, иначе он оплачивается дважды. У Claude наоборот:
-  там `input_tokens` уже остаток. Поэтому вычитание живёт в провайдере, а не в базе.
-
-Разница окон печатается с той точностью, с какой её сообщает провайдер: проценты
-целые, поэтому короткий ход показывает `+0.0` — он действительно не сдвинул счётчик
-на целый процент.
-
-## В докере
-
-Работает, но вход туда не переезжает: он интерактивный, а браузера в контейнере нет.
-Токены попадают внутрь вместе с каталогом учётной записи — войдите на хосте и
-смонтируйте его томом, указав `AGENT_HOME` на точку монтирования.
+A container needs Python 3.14+, Git, the package, and Node.js/provider CLI. The following is a building-block example; replace CLI version placeholders with versions verified in your deployment and install your application and this package:
 
 ```dockerfile
 FROM node:24-bookworm-slim AS node
@@ -489,29 +278,43 @@ FROM python:3.14-slim-bookworm
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
-    && npm install -g @openai/codex@<версия> @anthropic-ai/claude-code@<версия> \
+    && npm install -g @openai/codex@<version> @anthropic-ai/claude-code@<version> \
     && npm cache clean --force
 ENV AGENT_PROVIDER=claude AGENT_HOME=/data/account DISABLE_AUTOUPDATER=1
 ```
 
-Запускайте контейнер с `--init` (в compose — `init: true`). После каждого хода воркер
-снимает всю группу процессов CLI, включая фоновых потомков, и без init-процесса
-убитые потомки остаются зомби до перезапуска контейнера.
+Install Git in the image if fetching the package from its Git source. No GitHub token is needed for this public repository. Install only the provider CLIs your application uses.
 
-Один контейнер — один воркер, ровно как одно подключение. Версии CLI лучше закреплять:
-разбор ответов завязан на их формат вывода, и молчаливое обновление внутри образа —
-это молчаливая поломка. `DISABLE_AUTOUPDATER` о том же. Каталог `/data` должен
-принадлежать тому пользователю, под которым идёт процесс.
+Run with `docker run --init` or Compose `init: true`. The worker terminates the CLI process group after each turn; an init process reaps orphaned children. Ensure the mounted account and run directories belong to the container's user. Pin CLI versions because parsers depend on their output formats.
 
-У Claude есть headless-вариант: `claude setup-token` выдаёт долгоживущий токен, и
-тогда достаточно передать `CLAUDE_CODE_OAUTH_TOKEN` (он уже в списке разрешённых
-переменных). У Codex для подписки такого токена нет — только монтирование каталога.
+Claude also supports a headless token generated by `claude setup-token`; pass it as `CLAUDE_CODE_OAUTH_TOKEN`, which is allowed in the subprocess environment. Codex subscription login uses the mounted account directory.
 
-## Тесты
+The subprocess receives an explicit environment allowlist, including proxy and certificate settings such as `HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS`. Project secrets outside that allowlist are not forwarded automatically.
 
-Идут на сохранённых образцах реального вывода обеих CLI (`tests/samples/`),
-к моделям не обращаются, подписку не тратят и не требуют установленных CLI.
+## Architecture and testing
 
-Для тестов кода, построенного на пакете, есть `agent_workers.testing`: `FakeAdapter`
-отвечает эхом через дочерний процесс Python вместо CLI и отдаёт заданные замеры,
-`QUIET` — политика без пауз между замерами.
+`base/` owns subprocess supervision, stdio, append-only run logs, locks, usage policy, cost arithmetic, and polling. `providers/` owns CLI flags, JSONL parsing, usage probes, and provider prices. `base/contract.py` defines the shared `Adapter`, `Command`, `Reply`, `Limits`, `Usage`, and `Cost` types. `tests/test_boundary.py` checks the dependency boundary.
+
+Run:
+
+```bash
+uv sync
+uv run python examples/outbox_demo.py
+uv run ruff check .
+uv run pytest
+```
+
+Tests use saved real CLI output in `tests/samples/` and subprocess fakes; they do not need installed provider CLIs or spend a subscription. `agent_workers.testing` provides `FakeAdapter`, `QUIET` (no settlement pauses), and `limits()` for downstream applications.
+
+## Troubleshooting
+
+| Symptom | Action |
+| --- | --- |
+| No provider configured | Set `AGENT_PROVIDER` in `.env` or pass `--provider`. |
+| CLI cannot be found/launched | Install the selected provider CLI; check `PATH` or `AGENT_<PROVIDER>_BINARY` and executable permissions. |
+| Login check fails | Run `login` with the same provider and account directory used by the worker. |
+| Different directories see different accounts | Check path resolution: `.env` paths are relative to the file; flag/environment paths are relative to the current directory. |
+| Turn is refused by limits | Inspect `before`, the window reset, threshold, and credit policy. |
+| Same key returns an older answer | Task keys identify work. Use a new key for a new task; collect only after accepting the previous result. |
+| Entry is busy | A live local process holds its lock. Wait rather than deleting it. |
+| Reply is incomplete | Inspect `reason` and `reply.diagnostic`; let the coordinator decide whether another paid attempt is appropriate. |
